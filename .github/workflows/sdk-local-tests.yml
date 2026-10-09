@@ -1,0 +1,41 @@
+name: SDK Local Tests
+
+# The tests that need no AWS account, on every push and pull request.
+#
+# Deliberately credential-free: no secrets, no OIDC, no role to assume. That is
+# what lets it run on a fork, on a first push before any role exists, and for
+# anyone who has cloned the repository. The cloud workflow beside this one is
+# manual, billed, and takes half an hour; this is what tells you the tree is
+# broken before you spend that.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  local-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # Installed from source rather than from a built wheel. The cloud workflow
+      # builds one because it is verifying the artifact a buyer installs; this
+      # job is verifying the code, and a build step would cost time for no
+      # assertion gained.
+      - name: Install the package and pytest
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+          pip install pytest
+
+      - name: Run local tests
+        run: pytest tests/ -v -m local

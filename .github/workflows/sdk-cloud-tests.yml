@@ -1,0 +1,118 @@
+name: SDK Cloud Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      algorithm_version:
+        description: 'Algorithm version to test against'
+        required: true
+        type: choice
+        options:
+          - '1.0'
+
+permissions:
+  id-token: write   # For OIDC authentication
+  contents: write   # For creating GitHub Releases
+
+jobs:
+  cloud-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Build wheel
+        run: |
+          pip install build hatchling hatch-vcs
+          python -m build --wheel
+          echo "Built wheel:"
+          ls -la dist/*.whl
+
+      - name: Install wheel in fresh environment
+        run: |
+          python -m venv /tmp/test-env
+          /tmp/test-env/bin/pip install dist/*.whl
+          /tmp/test-env/bin/pip install pytest
+          echo "Installed SDK version:"
+          /tmp/test-env/bin/python -c "import importlib.metadata; print(importlib.metadata.version('lifespan-predictor'))"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: eu-west-1
+
+      - name: Resolve algorithm ARN from SSM
+        id: resolve_arn
+        run: |
+          set -euo pipefail
+          ALGO_VERSION="${{ inputs.algorithm_version }}"
+          ARN_PARAM="/lifespan-predictor/algorithm-arn/stable/${ALGO_VERSION}"
+          ARN=$(aws ssm get-parameter --name "$ARN_PARAM" --query "Parameter.Value" --output text)
+          echo "Algorithm ARN: $ARN"
+          echo "arn=$ARN" >> "$GITHUB_OUTPUT"
+
+      - name: Run cloud tests
+        env:
+          SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
+          SAGEMAKER_ALGORITHM_ARN: ${{ steps.resolve_arn.outputs.arn }}
+          SAGEMAKER_BUCKET: kooditurva-lifespan-predictor-sdk-ci
+        run: /tmp/test-env/bin/pytest tests/ -v -m cloud
+
+      # Compatibility is settled inside the training container, which compares
+      # the SDK's major.minor against the algorithm version it was built for.
+      # Nothing has to be published from here for that to work. What a passing
+      # run means is recorded in the run itself and the release notes below.
+
+      - name: Promote the candidate to a release
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RC_TAG: ${{ github.ref_name }}
+          # The ARN this run actually resolved, not the version input. That
+          # input is a release *line*: the registry keys on major.minor and
+          # overwrites, so "1.49" names whichever patch is newest when it is
+          # read. Writing it into a release note turns a record of what was
+          # tested into a pointer that moves after the next patch ships.
+          ALGORITHM_ARN: ${{ steps.resolve_arn.outputs.arn }}
+        run: |
+          set -euo pipefail
+
+          ALGORITHM="${ALGORITHM_ARN##*/}"
+
+          # This job is the only thing entitled to create a bare tag. Everything
+          # else stops at `-rcN`, so `pip install …@v1.49.2` can only ever
+          # resolve to a tree that reached this line — which is what a buyer is
+          # relying on when they pin a version.
+          if ! VERSION=$(python3 scripts/compute_next_tag.py promote "$RC_TAG"); then
+            echo "Dispatched on $RC_TAG, which is not a release candidate."
+            echo "Nothing to promote; the cloud tests still passed."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$VERSION" -m "Verified against $ALGORITHM"
+          git push origin "$VERSION"
+
+          # The candidate's notes were written by the sync and are the same
+          # changes; what the full release adds is the fact that they ran.
+          gh release view "$RC_TAG" --json body --jq .body > notes.md || : > notes.md
+          {
+            echo
+            echo "Verified against \`${ALGORITHM}\` on $(date -u +%Y-%m-%d)."
+          } >> notes.md
+
+          gh release create "$VERSION" dist/*.whl \
+            --title "$VERSION" \
+            --notes-file notes.md \
+            --latest \
+            --verify-tag
+          echo "✅ Promoted $RC_TAG to $VERSION"

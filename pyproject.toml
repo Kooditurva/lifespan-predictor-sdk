@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lifespan-predictor"
+dynamic = ["version"]
+description = "Lifespan Predictor SDK - Survival Analysis with Deep Learning via AWS SageMaker"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "pandas>=1.3.0",
+    "numpy>=1.21.0",
+    "boto3",
+    "sagemaker<3.0.0",
+    "requests",
+    "scikit-learn",
+    "matplotlib",
+]
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0.dev0"
+raw-options.version_scheme = "no-guess-dev"
+raw-options.tag_regex = "^v(?P<version>\\d+\\.\\d+\\.\\d+(?:-rc\\d+)?)$"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "lifespan_predictor_sdk/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lifespan_predictor_sdk"]
+
+[tool.pytest.ini_options]
+markers = [
+    "local: marks tests as local (fast, no cost)",
+    "cloud: marks tests as cloud (slow, AWS cost)",
+    "slow: marks tests as slow",
+]

@@ -1,0 +1,189 @@
+name: Auto Tag
+
+on:
+  push:
+    branches:
+      - main
+      - 'rel-*'
+  workflow_dispatch:
+    inputs:
+      bump_major:
+        description: 'Force major version bump'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute and create tag
+        id: tag
+        env:
+          BUMP_MAJOR_INPUT: ${{ github.event.inputs.bump_major }}
+        run: |
+          set -euo pipefail
+
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          echo "Branch: $BRANCH"
+
+          # Check if this commit already has a tag
+          EXISTING=$(git tag --points-at HEAD 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            echo "Commit already tagged: $EXISTING — skipping."
+            exit 0
+          fi
+
+          # Get latest tag for context
+          LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Latest tag: $LATEST"
+
+          # Parse version components from latest tag
+          # Strip leading 'v' and any pre-release suffix for base version
+          BASE="${LATEST#v}"
+          # Extract major.minor.patch (ignore pre-release suffixes)
+          MAJOR=$(echo "$BASE" | cut -d. -f1)
+          MINOR=$(echo "$BASE" | cut -d. -f2)
+          PATCH=$(echo "$BASE" | cut -d. -f3 | cut -d- -f1)
+
+          # Default to 0 if empty
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+
+          echo "Parsed: major=$MAJOR minor=$MINOR patch=$PATCH"
+
+          # Determine bump type based on branch
+          if [ "$BRANCH" = "main" ]; then
+            # Check for bump:major label on the merged PR
+            BUMP_MAJOR="false"
+
+            if [ "$BUMP_MAJOR_INPUT" = "true" ]; then
+              BUMP_MAJOR="true"
+              echo "Major bump via workflow_dispatch input"
+            else
+              # Check if the merge commit references a PR with bump:major label
+              MERGE_MSG=$(git log -1 --pretty=%s)
+              PR_NUM=$(echo "$MERGE_MSG" | grep -oP '#\K\d+' | head -1 || true)
+              if [ -n "$PR_NUM" ]; then
+                LABELS=$(gh pr view "$PR_NUM" --json labels --jq '.labels[].name' 2>/dev/null || true)
+                if echo "$LABELS" | grep -q "^bump:major$"; then
+                  BUMP_MAJOR="true"
+                  echo "Major bump via bump:major label on PR #$PR_NUM"
+                fi
+              fi
+            fi
+
+            if [ "$BUMP_MAJOR" = "true" ]; then
+              NEW_TAG="v$((MAJOR + 1)).0.0"
+            else
+              NEW_TAG="v${MAJOR}.$((MINOR + 1)).0"
+            fi
+
+          elif [[ "$BRANCH" == rel-* ]]; then
+            # A release branch produces a *candidate*, never a bare tag. This
+            # SDK is installed straight from a tag, so a bare vX.Y.Z is the
+            # artifact itself; publishing one here would hand out an install
+            # that has never run against an algorithm. sdk-cloud-tests.yml
+            # creates the bare tag, and only after its run passes.
+            #
+            # The rule lives in scripts/compute_next_tag.py rather than in this
+            # shell, so it can be tested without building a tag history.
+            NEW_TAG=$(python3 scripts/compute_next_tag.py next "$BRANCH" \
+              $(git tag -l "v*"))
+
+          else
+            echo "Branch $BRANCH does not match tagging rules — skipping."
+            exit 0
+          fi
+
+          echo "New tag: $NEW_TAG"
+
+          # Retry loop for race conditions (two merges in quick succession)
+          MAX_RETRIES=3
+          for i in $(seq 1 $MAX_RETRIES); do
+            # Re-fetch tags in case another job just pushed one
+            git fetch --tags
+
+            if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+              echo "Tag $NEW_TAG already exists (race condition). Recomputing..."
+              # Re-read latest and recompute (simplified: just bump again)
+              LATEST=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+              BASE="${LATEST#v}"
+              MAJOR=$(echo "$BASE" | cut -d. -f1)
+              MINOR=$(echo "$BASE" | cut -d. -f2)
+              PATCH=$(echo "$BASE" | cut -d. -f3 | cut -d- -f1)
+              MAJOR=${MAJOR:-0}; MINOR=${MINOR:-0}; PATCH=${PATCH:-0}
+
+              if [ "$BRANCH" = "main" ]; then
+                NEW_TAG="v${MAJOR}.$((MINOR + 1)).0"
+              fi
+              sleep $((i * 2))
+              continue
+            fi
+
+            # Create and push tag
+            git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+            git push origin "$NEW_TAG"
+            echo "✅ Tagged and pushed: $NEW_TAG"
+            echo "tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+            exit 0
+          done
+
+          echo "❌ Failed to create unique tag after $MAX_RETRIES retries"
+          exit 1
+
+      # A tag with no release is what this repository had for every version it
+      # ever cut: the only release step lived in the billed, manually dispatched
+      # cloud workflow, and it produced a draft nobody published. Building the
+      # wheel here costs a minute and means every tag is installable and
+      # documented the moment it exists.
+      - name: Set up Python
+        if: steps.tag.outputs.tag != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Build the wheel
+        if: steps.tag.outputs.tag != ''
+        run: |
+          pip install build hatchling hatch-vcs
+          python -m build --wheel
+
+      - name: Publish the release candidate
+        if: steps.tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          # --prerelease, because nothing here has run against an algorithm yet.
+          # sdk-cloud-tests.yml is what clears it. Notes come from CHANGELOG.md,
+          # written by the sync: --generate-notes would read this repository's
+          # history, which is one squashed commit per release and says nothing.
+          NOTES=CHANGELOG.md
+          if [ ! -f "$NOTES" ]; then
+            NOTES=/dev/null
+          fi
+
+          gh release create "$TAG" dist/*.whl \
+            --title "$TAG" \
+            --notes-file "$NOTES" \
+            --prerelease \
+            --verify-tag
+          echo "✅ Published $TAG as a release candidate"
