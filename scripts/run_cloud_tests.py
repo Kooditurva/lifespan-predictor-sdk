@@ -10,7 +10,7 @@ It builds the wheel into dist/, installs it in a fresh virtual environment, runs
 the local tests, and then the cloud tests against the installed wheel. A local
 failure stops it before anything is billed. The cloud tests start SageMaker
 jobs in your account, and those are billed. With --notebook, a passing run then
-executes examples/marketplace_sample.ipynb with the same wheel and keeps its
+executes examples/sagemaker_training_demo.ipynb with the same wheel and keeps its
 cleaned outputs (scripts/record_notebook.py), as a release does.
 
 What it needs:
@@ -67,7 +67,7 @@ def _bin(venv, name):
     return venv / "bin" / name
 
 
-NOTEBOOK = Path("examples") / "marketplace_sample.ipynb"
+NOTEBOOK = Path("examples") / "sagemaker_training_demo.ipynb"
 
 
 def run(

@@ -28,7 +28,7 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-NOTEBOOK = "examples/marketplace_sample.ipynb"
+NOTEBOOK = "examples/sagemaker_training_demo.ipynb"
 # A runner has no git identity, and the commit and the annotated tag both need one.
 AS_BOT = [
     "git",

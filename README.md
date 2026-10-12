@@ -130,18 +130,15 @@ model.delete()                                     # stops the endpoint's billin
 
 ## Examples
 
-Both notebooks in [`examples/`](examples/) need the environment variables from the
-[Quick Start](#quick-start), and both submit billed SageMaker jobs.
+[`sagemaker_training_demo.ipynb`](examples/sagemaker_training_demo.ipynb) runs the
+whole workflow on NASA's turbofan engine data: training, evaluation with
+calibration curves, a SageMaker model, batch transform, scoring, and a real-time
+endpoint, then cleanup. It fits the free tier, needs the environment variables
+from the [Quick Start](#quick-start), and submits billed SageMaker jobs.
 
-- [`marketplace_sample.ipynb`](examples/marketplace_sample.ipynb) runs the whole
-  workflow on generated data: training, tuning, a SageMaker model, batch
-  transform, survival curves and a real-time endpoint, then cleanup. It fits
-  the free tier. At each release's tag it shows the output of the run that
-  tested that release, so you can read what each step produces before running
-  it.
-- [`sagemaker_training_demo.ipynb`](examples/sagemaker_training_demo.ipynb)
-  trains on the NASA Turbofan Engine dataset, and shows evaluation metrics,
-  calibration plots and the training job's details.
+[See it with the output of the run that tested
+v1.0.2](https://github.com/Kooditurva/lifespan-predictor-sdk/blob/v1.0.2/examples/sagemaker_training_demo.ipynb)
+before running it yourself.
 
 ## Running the Tests
 
@@ -158,7 +155,7 @@ python scripts/run_cloud_tests.py
 It builds the wheel, installs it in a fresh virtual environment, runs the local
 tests, and then the cloud tests against the installed wheel. The cloud tests
 start SageMaker training and batch transform jobs in your account, which are
-billed. With `--notebook` it then runs `examples/marketplace_sample.ipynb` too,
+billed. With `--notebook` it then runs `examples/sagemaker_training_demo.ipynb` too,
 as a release does. Without `SAGEMAKER_ALGORITHM_ARN` it uses the free tier's ARN in
 `eu-west-1`. Arguments after `--` go to pytest, for example
 `python scripts/run_cloud_tests.py -- -k inference`.
