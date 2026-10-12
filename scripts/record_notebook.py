@@ -150,7 +150,14 @@ def record(path, timeout=3600):
     executable = nbformat.reads(json.dumps(run), as_version=4)
 
     # The kernel is this Python, which has the wheel installed.
-    NotebookClient(executable, kernel_name="python3", timeout=timeout).execute()
+    try:
+        NotebookClient(executable, kernel_name="python3", timeout=timeout).execute()
+    except Exception as error:
+        # A cell's traceback can come back empty, and then nbclient's message is
+        # only the cell and its stdout. Name the error, or the log never says.
+        ename = getattr(error, "ename", type(error).__name__)
+        evalue = getattr(error, "evalue", "")
+        raise SystemExit(f"The notebook failed: {ename}: {evalue}\n\n{error}")
     executed = json.loads(nbformat.writes(executable))
 
     account = boto3.client("sts").get_caller_identity()["Account"]
