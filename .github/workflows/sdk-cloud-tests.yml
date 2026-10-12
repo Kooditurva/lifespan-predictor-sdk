@@ -83,7 +83,7 @@ jobs:
           name: tested-release
           path: |
             dist/*.whl
-            examples/marketplace_sample.ipynb
+            examples/sagemaker_training_demo.ipynb
           if-no-files-found: error
 
   publish:

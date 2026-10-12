@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run the sample notebook and keep its outputs, cleaned, in place. Billed.
 
-    python scripts/record_notebook.py examples/marketplace_sample.ipynb
+    python scripts/record_notebook.py examples/sagemaker_training_demo.ipynb
 
 The release runs this after the tests pass, with the tested wheel installed in
 this Python, so the notebook's install cell is skipped: the tag it installs does
