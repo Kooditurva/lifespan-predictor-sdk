@@ -177,6 +177,9 @@ with the tested wheel. The tag's commit adds the notebook's recorded outputs to
 the tested one. A maintainer then marks the pre-release as a release. A released
 version never moves.
 
+If the tests pass but publishing fails, use "Re-run failed jobs" on the run. It
+reruns only the publish, with the wheel and the notebook the tests produced.
+
 ## License
 
 MIT - see [LICENSE](LICENSE) for details.
