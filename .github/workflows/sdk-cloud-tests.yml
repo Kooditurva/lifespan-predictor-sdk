@@ -1,0 +1,84 @@
+name: SDK Cloud Tests
+
+# The release. Run by hand on main: the local tests, the cloud tests and the
+# sample notebook against the free tier, then, when all pass, tag vX.Y.Z and
+# publish a pre-release with the tested wheel. A maintainer releases it in
+# GitHub. On any other branch it tests and publishes nothing.
+#
+# Runs in any fork, in the fork's own AWS account, with no edit to this file.
+# Everything account-specific comes from the fork's settings:
+#
+#   algorithm_arn input, or the SAGEMAKER_ALGORITHM_ARN repository variable:
+#       the algorithm ARN of your Marketplace subscription. Defaults to the
+#       free tier's in eu-west-1. The region is read from it.
+#   AWS_ROLE_ARN secret:        a role this repository may assume through
+#                               GitHub OIDC.
+#   SAGEMAKER_ROLE_ARN secret:  the SageMaker execution role your jobs run as.
+#   SAGEMAKER_BUCKET variable:  optional; SageMaker's default bucket otherwise.
+
+on:
+  workflow_dispatch:
+    inputs:
+      algorithm_arn:
+        description: 'Algorithm ARN of your subscription (empty: the SAGEMAKER_ALGORITHM_ARN variable, else the free tier in eu-west-1)'
+        required: false
+        default: ''
+
+permissions:
+  id-token: write   # For OIDC authentication
+  contents: write   # For the tag and the pre-release
+
+jobs:
+  cloud-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Before anything is billed: a released version never moves.
+      - name: Stop if this version is already released
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/publish_prerelease.py check
+
+      # Resolving needs no credentials, so a malformed ARN stops the run before
+      # it signs in. The dispatch input reaches the script through its
+      # environment, never interpolated into it, so it cannot inject a command.
+      - name: Resolve the algorithm ARN and its region
+        id: resolve_arn
+        env:
+          SAGEMAKER_ALGORITHM_ARN: ${{ inputs.algorithm_arn || vars.SAGEMAKER_ALGORITHM_ARN }}
+        run: python scripts/run_cloud_tests.py resolve
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ steps.resolve_arn.outputs.region }}
+
+      # scripts/run_cloud_tests.py is what anyone with a clone runs: one way to
+      # run these tests, not two. It builds the wheel into dist/, runs the local
+      # tests against it before anything is billed, then the cloud tests, then
+      # the sample notebook, whose cleaned outputs it writes in place.
+      - name: Run the tests and the sample notebook
+        env:
+          SAGEMAKER_ALGORITHM_ARN: ${{ steps.resolve_arn.outputs.arn }}
+          SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
+          SAGEMAKER_BUCKET: ${{ vars.SAGEMAKER_BUCKET }}
+        run: python scripts/run_cloud_tests.py run --notebook
+
+      - name: Publish the pre-release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ALGORITHM_ARN: ${{ steps.resolve_arn.outputs.arn }}
+        run: >-
+          python scripts/publish_prerelease.py publish
+          --algorithm-arn "$ALGORITHM_ARN" --tested-commit "$GITHUB_SHA"
