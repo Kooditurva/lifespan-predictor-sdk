@@ -29,6 +29,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 NOTEBOOK = "examples/marketplace_sample.ipynb"
+# A runner has no git identity, and the commit and the annotated tag both need one.
+AS_BOT = [
+    "git",
+    "-c",
+    "user.name=github-actions[bot]",
+    "-c",
+    "user.email=github-actions[bot]@users.noreply.github.com",
+]
 
 
 def read_version(root=ROOT):
@@ -97,11 +105,7 @@ def publish(version, algorithm_arn, tested_commit, run=_run, root=ROOT):
     _must(
         run,
         [
-            "git",
-            "-c",
-            "user.name=github-actions[bot]",
-            "-c",
-            "user.email=github-actions[bot]@users.noreply.github.com",
+            *AS_BOT,
             "commit",
             "--allow-empty",
             "-m",
@@ -111,7 +115,7 @@ def publish(version, algorithm_arn, tested_commit, run=_run, root=ROOT):
     if prerelease:
         _must(run, ["gh", "release", "delete", tag, "--cleanup-tag", "--yes"])
         run(["git", "tag", "-d", tag])  # the checkout fetched it; absent is fine
-    _must(run, ["git", "tag", "-a", tag, "-m", f"Tested against {algorithm_arn}"])
+    _must(run, [*AS_BOT, "tag", "-a", tag, "-m", f"Tested against {algorithm_arn}"])
     _must(run, ["git", "push", "origin", tag])
 
     notes = Path(tempfile.mkdtemp()) / "notes.md"
