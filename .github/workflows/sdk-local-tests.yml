@@ -39,3 +39,10 @@ jobs:
 
       - name: Run local tests
         run: pytest tests/ -v -m local
+
+      # The same build the API reference workflow publishes from each release,
+      # so a docstring that breaks the page fails here, before a release.
+      - name: Build the API reference
+        run: |
+          pip install pdoc==15.0.1
+          python -W error -m pdoc --docformat google -o "$RUNNER_TEMP/api-reference" lifespan_predictor_sdk '!lifespan_predictor_sdk.'

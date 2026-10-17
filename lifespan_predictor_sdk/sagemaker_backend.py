@@ -30,18 +30,29 @@ def _resolve_bucket(model_config, sagemaker_session):
     )
 
 
-def load_tuning_trials(s3, model_data_uri: str):
+def load_tuning_trials(s3, model_data_uri: str, config: dict):
     """The tuning results of a training job, or None if it didn't tune.
 
     The container writes them to /opt/ml/output/data, which SageMaker uploads as
     output.tar.gz beside model.tar.gz. A job that wrote nothing there has no
     output.tar.gz.
+
+    `config` is the one the job was submitted with. Its ranges name the tuned
+    settings, which become each trial's `params`: the container records only a
+    trial's whole config.
     """
     import tarfile
 
     import botocore.exceptions
 
     from lifespan_predictor_sdk.hpo_io import TrialResult, TuningTrials, without_internal_keys
+    from lifespan_predictor_sdk.survival_model import CategoricalRange, ContinuousRange, IntegerRange
+
+    tuned = [
+        key
+        for key, value in config.items()
+        if isinstance(value, (ContinuousRange, IntegerRange, CategoricalRange))
+    ]
 
     bucket = model_data_uri.split("/")[2]
     key = "/".join(model_data_uri.split("/")[3:]).rsplit("/", 1)[0] + "/output.tar.gz"
@@ -61,19 +72,21 @@ def load_tuning_trials(s3, model_data_uri: str):
         if not os.path.exists(trials_path):
             return None
         with open(trials_path) as f:
-            trials = TuningTrials(
-                [
-                    TrialResult(
-                        number=t["number"],
-                        value=t["value"],
-                        params=without_internal_keys(t.get("config", {})),
-                        config=without_internal_keys(t.get("config", {})),
-                        state=t["state"],
-                        fold_scores_list=t.get("fold_scores"),
-                    )
-                    for t in json.load(f)
-                ]
+            recorded = json.load(f)
+        results = []
+        for t in recorded:
+            trial_config = without_internal_keys(t.get("config", {}))
+            results.append(
+                TrialResult(
+                    number=t["number"],
+                    value=t["value"],
+                    params={k: trial_config[k] for k in tuned if k in trial_config},
+                    config=trial_config,
+                    state=t["state"],
+                    fold_scores_list=t.get("fold_scores"),
+                )
             )
+        trials = TuningTrials(results)
 
         best_config_path = os.path.join(tmpdir, "best_config.json")
         if os.path.exists(best_config_path):
@@ -432,7 +445,7 @@ class SageMakerBackend:
                 data = np.load(cal_path, allow_pickle=True)
                 cal_curve_data = (data["sorted_cdf"], data["empirical_cdf"])
 
-        tuning_trials = load_tuning_trials(s3, model_data_uri)
+        tuning_trials = load_tuning_trials(s3, model_data_uri, model.config)
         if tuning_trials is not None:
             print(f"✓ tuning_trials loaded: {len(tuning_trials)} trials")
 

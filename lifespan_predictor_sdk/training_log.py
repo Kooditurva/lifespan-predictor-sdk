@@ -8,7 +8,30 @@ import pandas as pd
 
 
 class EvaluationResult:
-    """Result of model.evaluate(), with display and plotting methods."""
+    """
+    How well a model scored on labelled data.
+
+    Returned by `SurvivalModel.evaluate()`, and by
+    `SurvivalModel.get_evaluation_result()` when `fit()` was given test data.
+    A metric that could not be computed is None.
+
+    Attributes:
+        c_index: Harrell's concordance index: the fraction of comparable pairs
+            of units whose predicted times are in the right order. 0.5 is
+            chance, 1.0 is perfect.
+        ipcw_c_index: The concordance index corrected for censoring.
+        rmse: Root mean squared error of the predicted mean times, over the
+            units that failed.
+        ibs: Integrated Brier score of the survival curves; lower is better.
+        ibs_classification: A plain-words reading of `ibs`.
+        calibration_bias: How far the predicted probabilities are from the
+            observed ones, signed.
+        calibration_classification: A plain-words reading of
+            `calibration_bias`.
+
+    A result can also be read like a dict: `result["c_index"]`,
+    `result.get("ibs")`.
+    """
 
     def __init__(
         self,
@@ -67,10 +90,26 @@ class EvaluationResult:
         return hasattr(self, key)
 
     def get(self, key, default=None):
+        """
+        A metric by name, like `dict.get`.
+
+        Args:
+            key: The attribute's name, such as `"c_index"`.
+            default: What to return if there is no such attribute.
+
+        Returns:
+            The metric's value, or `default`.
+        """
         return getattr(self, key, default)
 
     def get_metrics(self):
-        """Return scalar evaluation metrics as a dict."""
+        """
+        The scalar metrics, as a dict.
+
+        Returns:
+            A dict with `c_index` and `rmse`, and each other metric that was
+            computed.
+        """
         metrics = {"c_index": self.c_index, "rmse": self.rmse}
         if self.ipcw_c_index is not None:
             metrics["ipcw_c_index"] = self.ipcw_c_index
@@ -197,10 +236,14 @@ class EvaluationResult:
                         print(f"      Risk {k}: {_fmt(c)}")
 
     def plot_predictions(self, figsize=(8, 6)):
-        """Scatter plot of actual vs predicted values (uncensored samples only).
+        """Scatter plot of actual against predicted times, for the units that failed.
+
+        Args:
+            figsize: The figure's size in inches, as `(width, height)`.
 
         Returns:
-            (fig, ax) matplotlib tuple, or None if prediction arrays are unavailable.
+            A matplotlib `(fig, ax)` tuple, or None if the per-unit predictions
+            were not kept, as for the result of a training job.
         """
         import matplotlib.pyplot as plt
 
@@ -243,10 +286,17 @@ class EvaluationResult:
         return fig, ax
 
     def plot_calibration(self, figsize=(12, 5), show="uncensored"):
-        """Plot calibration curve and IBS.
+        """Plot the calibration curve, and the integrated Brier score.
+
+        Args:
+            figsize: The figure's size in inches, as `(width, height)`.
+            show: `"uncensored"` draws the curve over the units that failed;
+                `"all"` draws it over all units, with the uncensored curve
+                beside it.
 
         Returns:
-            matplotlib Figure and axes, or None if no calibration data available.
+            A matplotlib `(fig, axes)` tuple, or None if there is no calibration
+            data.
         """
         if self.calibration_sorted_cdf is None and self.calibration_bias is None:
             print("No calibration data available.")
@@ -373,6 +423,7 @@ class EvaluationResult:
         return fig, axes
 
     def report(self):
+        """Print the metrics and draw both plots."""
         self.print_metrics()
         self.plot_predictions()
         self.plot_calibration()
@@ -389,7 +440,19 @@ class FitQuality(Enum):
 
 
 class TrainingLog:
-    """Wrapper for training logs, in the same shape wherever training ran."""
+    """
+    The history of one training run, returned by `SurvivalModel.fit()`.
+
+    Attributes:
+        train_loss: Training loss per epoch.
+        val_loss: Validation loss per epoch, or None without validation data.
+        learning_rate: Learning rate per epoch.
+        epochs: The configured maximum number of epochs.
+        num_epochs: The number of epochs trained, fewer than `epochs` if
+            training stopped early.
+        best_epochs: The epoch with the lowest validation loss, whose weights
+            the model keeps; None without validation data.
+    """
 
     def __init__(self, train_loss, learning_rate, epochs, val_loss=None):
         self.train_loss = train_loss
@@ -403,10 +466,16 @@ class TrainingLog:
             self.best_epochs = int(self.val_loss.index(min(self.val_loss)) + 1)
         else:
             self.best_epochs = None
-        self.val_c_index: float | None = None
+        self._val_c_index = None
 
     def to_pandas(self):
-        """Convert to pandas DataFrame for plotting."""
+        """
+        The losses as a DataFrame.
+
+        Returns:
+            A DataFrame with `epoch`, `train_loss` and, with validation data,
+            `val_loss`.
+        """
         data = {
             "epoch": list(range(1, len(self.train_loss) + 1)),
             "train_loss": self.train_loss,
@@ -554,15 +623,25 @@ class TrainingLog:
         return fig, ax
 
     def analyze_fit_quality(self):
-        """Analyze train_loss, val_loss and learning_rate to determine goodness of fit. If val_loss is empty, can only analyze partially and not all return values are possible.
-        returns an enum with the following values:
-        - GOOD_FIT: if the training loss and validation loss are both decreasing and gap is not widening. After LR
-          reduction, temporary val_loss increase is tolerated for 1-2 epochs. Early stopping did not kick in, meaning best_epochs is close to epochs. Latest LR reduction was not successful in decreasing val_loss.
-        - OVER_FIT: Gap between train and val loss widening over time (val_loss increasing while train_loss
-          decreasing for >3 consecutive epochs). After LR reduction, temporary val_loss increase is tolerated for 1-2 epochs. Epochs after best_epochs are not considered.
-        - UNDER_FIT: Both losses decreasing but average improvement per epoch
-          <1% over last 10 epochs.
-        - FULL_FIT: like GOOD_FIT, but early stopping kicked in (best_epochs < (epochs +3)) and LR reduction didn't help to further decrease val_loss.
+        """
+        Judge from the losses whether the model fits its data well.
+
+        Epochs after `best_epochs` are not considered, and a brief rise in
+        validation loss just after a learning-rate reduction is tolerated.
+
+        Returns:
+            None without validation data; otherwise a `FitQuality`, whose
+            `.value` is one of:
+
+            - `"good_fit"`: both losses fell and the gap between them did not
+              widen, and training ran to about its last epoch.
+            - `"full_fit"`: like a good fit, but training stopped early and the
+              last learning-rate reduction no longer helped.
+            - `"over_fit"`: validation loss rose while training loss fell for
+              more than three epochs in a row.
+            - `"under_fit"`: both losses still falling, but by less than 1% per
+              epoch over the last ten epochs.
+            - `"unknown_fit"`: none of the above.
         """
         if self.val_loss is None or len(self.val_loss) == 0:
             return None

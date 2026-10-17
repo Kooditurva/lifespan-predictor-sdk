@@ -134,7 +134,25 @@ class TrialResult:
 
 
 class TuningTrials:
-    """Wrapper around a list of TrialResult objects with convenience methods."""
+    """
+    The trials of a tuning run, returned by `SurvivalModel.get_tuning_trials()`.
+
+    Iterate over it for the trials in the order they ran; `len()` counts them.
+    Each trial has:
+
+    - `number`: its position in the run, from 0.
+    - `params`: the values drawn from the config's ranges.
+    - `config`: the whole config it trained with.
+    - `value`: its mean score over the folds. Higher is better: for
+      `hpo_metric="ibs"` it is the integrated Brier score negated.
+    - `fold_scores()`: its score on each fold.
+    - `metric`: the `hpo_metric` it was scored by.
+    - `state`: `"COMPLETE"`, or `"FAIL"` if it could not be scored.
+
+    Attributes:
+        best_config: The config of the best trial, with every range replaced by
+            its best value. This is the config `fit()` retrained with.
+    """
 
     def __init__(self, trials: list):
         self._trials = trials
@@ -150,7 +168,12 @@ class TuningTrials:
         return iter(self._trials)
 
     def get_best_trial(self):
-        """Return the TrialResult with the highest mean score (c-index or negated IBS)."""
+        """
+        The completed trial with the highest mean score.
+
+        Returns:
+            That trial, or None if no trial completed.
+        """
         completed = [
             t
             for t in self._trials
@@ -170,9 +193,10 @@ def _assign_units_to_folds(unit_df, n_splits: int) -> list:
     """
     Distribute units across n_splits folds with stratification by event and duration.
 
-    Within each stratum (event_value × duration_quartile) units are sorted by
-    mean duration then assigned round-robin, so each fold receives a balanced
-    mix of short/long durations and censored/failed units.
+    Strata (event_value × duration_quartile) are visited in turn, each sorted by
+    mean duration, and their units are dealt round-robin in one continuous deal.
+    Each fold receives a balanced mix of short/long durations and censored/failed
+    units, and fold sizes differ by at most one.
 
     Args:
         unit_df: DataFrame with columns: unit, event, duration_mean.
@@ -192,31 +216,118 @@ def _assign_units_to_folds(unit_df, n_splits: int) -> list:
         .apply(lambda p: min(int(p * n_bins), n_bins - 1))
     )
 
+    # One deal across all strata, not one per stratum: restarting at fold 0 in
+    # each stratum made the first fold the largest and could leave the last
+    # empty.
+    dealt = 0
     for ev in sorted(unit_df["event"].unique()):
         for dur_bin in sorted(unit_df["_dur_bin"].unique()):
             stratum = unit_df[
                 (unit_df["event"] == ev) & (unit_df["_dur_bin"] == dur_bin)
             ].sort_values("duration_mean")
-            for i, unit in enumerate(stratum["unit"].values):
-                folds[i % n_splits].append(unit)
+            for unit in stratum["unit"].values:
+                folds[dealt % n_splits].append(unit)
+                dealt += 1
 
     return folds
 
 
-def _stratified_kfold(train_df, n_splits: int = 5, seed: int = 42):
+def stratified_kfold(train_df, n_splits: int = 5, seed: int = 42):
     """
-    Yield (fold_train_df, fold_val_df) pairs stratified by event and duration.
+    Split training data into cross-validation folds, by unit.
 
-    Splitting is at unit level — no unit appears in both train and val.
-    Stratification ensures each fold has a similar event rate and duration
-    distribution, producing more reliable cross-validation scores.
+    These are the folds `SurvivalModel.fit()` tunes on. Use them to search
+    hyperparameters your own way, such as a grid search.
 
-    Requires columns: 'unit', 'event', 'duration'.
+    - **By unit.** All of a unit's rows go to the same side, so no unit is ever
+      in both halves of a fold, and each unit is in exactly one hold-out half.
+    - **Balanced.** Units are spread so that each fold has a similar event rate
+      and a similar spread of durations, which keeps fold scores comparable.
+    - **Deterministic.** The same data and `seed` give the same folds.
+
+    **Scoring a fold.** Score each model on its fold's hold-out half, which
+    must play no part in training. Give the model its own validation data for
+    early stopping, `val_split`, drawn from the training half. Do not pass the
+    hold-out half as `val_df`: validation data chooses the epoch the model
+    keeps and when its learning rate drops, so a score on it is optimistic.
+
+    The model predicts once per unit, at the unit's last row. A hold-out half
+    holds whole histories, so each unit's last row is at, or near, its end of
+    life, and scoring there says little. Cut each hold-out unit at a random
+    cycle first and label it with its remaining life at the cut, as a test set
+    is built. Then pass it to `fit()` as `test_df` and `test_labels_df`: the
+    model is scored on it after training, in the same training job, and never
+    trains on it.
+
+    ```python
+    from itertools import product
+
+    import numpy as np
+    import pandas as pd
+
+    from lifespan_predictor_sdk import SurvivalModel, stratified_kfold
+
+
+    def as_test_set(fold, seed=0):
+        # Cut each unit at a random cycle; label it with its remaining life there.
+        rng = np.random.default_rng(seed)
+        rows, labels = [], []
+        for _, history in fold.groupby("unit"):
+            cut = history.iloc[: rng.integers(1, len(history) + 1)]
+            rows.append(cut.drop(columns=["duration", "event"]))
+            labels.append(cut.iloc[-1][["unit", "duration", "event"]])
+        labels = pd.DataFrame(labels).astype({"unit": int, "event": int})
+        return pd.concat(rows), labels
+
+
+    folds = [
+        (fold_train, *as_test_set(hold_out))
+        for fold_train, hold_out in stratified_kfold(train_df)
+    ]
+    grid = {"learning_rate": [1e-3, 1e-2], "num_nodes": [[16], [32, 32]]}
+
+    best_params, best_score = None, float("-inf")
+    for values in product(*grid.values()):
+        params = dict(zip(grid, values))
+        scores = []
+        for fold_train, test_df, test_labels_df in folds:
+            model = SurvivalModel({"model_type": "deepsurv", "epochs": 30, **params})
+            model.fit(
+                fold_train,
+                val_split=0.2,
+                test_df=test_df,
+                test_labels_df=test_labels_df,
+            )
+            scores.append(model.get_evaluation_result().c_index)
+        score = float(np.mean(scores))
+        if score > best_score:
+            best_params, best_score = params, score
+
+    final = SurvivalModel({"model_type": "deepsurv", "epochs": 30, **best_params})
+    final.fit(train_df, val_split=0.2)
+    ```
+
+    On SageMaker every `fit()` is a separate training job, so this grid of 4
+    points over 5 folds runs 20 training jobs, plus the final one. Scoring
+    needs no `deploy()`: each job scores its own hold-out.
+
+    Args:
+        train_df: Training data with `unit`, `event` and `duration` columns, as
+            `SurvivalModel.fit()` takes it.
+        n_splits: The number of folds.
+        seed: Fixes how units are shuffled before they are assigned to folds.
+
+    Yields:
+        `n_splits` pairs `(fold_train_df, hold_out_df)` of DataFrames, each with
+        `train_df`'s columns.
+
+    Raises:
+        ValueError: If `train_df` lacks `unit`, `event` or `duration`.
     """
     for col in ("unit", "event", "duration"):
         if col not in train_df.columns:
             raise ValueError(
-                f"_stratified_kfold requires column '{col}' in train_df. "
+                f"stratified_kfold requires column '{col}' in train_df. "
                 f"Found columns: {list(train_df.columns)}"
             )
 
@@ -285,7 +396,3 @@ def _stratified_val_split(train_df, val_fraction: float = 0.2, seed: int = 42):
     return train_df[~val_mask].reset_index(drop=True), train_df[val_mask].reset_index(
         drop=True
     )
-
-
-# Alias for backwards compatibility
-_asset_aware_kfold = _stratified_kfold

@@ -111,27 +111,24 @@ def make_ncmapss_dataframe(h5_file, split="dev"):
 
 
 def get_nasa_train_dataframe(path, datasets=[1, 2, 3, 4], version="cmapss"):
-    """Load NASA train data.
+    """
+    Load the training split of a NASA turbofan dataset, ready for `fit()`.
 
-    Parameters
-    ----------
-    path : str
-        Directory containing the dataset files.
-    datasets : list of int
-        Which sub-datasets to include (1-4 for C-MAPSS, 1-8 for N-CMAPSS).
-    version : str
-        ``'cmapss'`` (default) for the original C-MAPSS text files, or one of
-        three N-CMAPSS variants carrying competing risks:
+    Download it first with `download_nasa_dataset()`.
 
-        - ``'ncmapss'`` -- NASA's archive, a single 15.7 GB object whatever
-          ``datasets`` says. Needs no AWS credentials; needs ``bsdtar``.
-        - ``'ncmapss-full'`` -- the same files, republished per sub-dataset in
-          this project's bucket, so one sub-dataset costs one object.
-        - ``'ncmapss-mini'`` -- the downsampled artifact, one row per flight
-          cycle. The only one a test can fetch.
+    Args:
+        path: The directory the dataset was downloaded to.
+        datasets: Which sub-datasets to include: 1 to 4 for C-MAPSS, 1 to 8 for
+            N-CMAPSS.
+        version: `"cmapss"` for the original C-MAPSS data, or an N-CMAPSS
+            variant: `"ncmapss"` (NASA's archive), `"ncmapss-full"` (the same
+            files, one download per sub-dataset) or `"ncmapss-mini"` (downsampled
+            to one row per flight cycle). In N-CMAPSS, `event` is the failure
+            mode: the sub-dataset's number.
 
-        All three label ``event`` with the failure mode (1-based dataset index)
-        through the same code path. They differ only in acquisition.
+    Returns:
+        A DataFrame with one row per unit and cycle: `unit`, `cycles`,
+        `duration`, `event` and the sensor and setting columns.
     """
     if version in _NCMAPSS_VERSIONS:
         df = None
@@ -210,31 +207,22 @@ def _truncate_ncmapss_test_split(df, subset_index):
 
 
 def get_nasa_test_dataframe(path, datasets=[1, 2, 3, 4], version="cmapss"):
-    """Load NASA test data and labels.
+    """
+    Load the test split of a NASA turbofan dataset and its labels.
 
-    Parameters
-    ----------
-    path : str
-        Directory containing the dataset files.
-    datasets : list of int
-        Which sub-datasets to include.
-    version : str
-        ``'cmapss'`` (default), or ``'ncmapss'`` / ``'ncmapss-full'`` /
-        ``'ncmapss-mini'`` -- see :func:`get_nasa_train_dataframe` for how the
-        three N-CMAPSS variants differ.
+    The pair is what `fit()` takes as `test_df` and `test_labels_df`. Each test
+    unit's rows stop before it failed, and its label is the remaining life at
+    its last row.
 
-        For every N-CMAPSS variant, each test unit's sequence is truncated
-        before failure (see :func:`_truncate_ncmapss_test_split`), the label
-        duration is the ``Y_test`` RUL at that cut, and ``event`` encodes the
-        failure mode (1-based dataset index), matching what
-        :func:`get_nasa_train_dataframe` assigns.
+    Args:
+        path: The directory the dataset was downloaded to.
+        datasets: Which sub-datasets to include, as for
+            `get_nasa_train_dataframe()`.
+        version: Which dataset, as for `get_nasa_train_dataframe()`.
 
-    Returns
-    -------
-    test_df : DataFrame
-        Feature rows (one row per unit/cycle).
-    test_labels_df : DataFrame
-        One row per unit with ``unit``, ``duration``, ``event`` columns.
+    Returns:
+        A tuple `(test_df, test_labels_df)`: the feature rows, one per unit and
+        cycle, and one label row per unit with `unit`, `duration` and `event`.
     """
     if version in _NCMAPSS_VERSIONS:
         test_df = None
@@ -405,20 +393,18 @@ def download_ncmapss_dataset(save_dir, datasets=[1]):
 
 
 def download_nasa_dataset(save_dir, datasets=None, version="cmapss"):
-    """Download NASA dataset files.
+    """
+    Download a NASA turbofan dataset, unless its files are already there.
 
-    Routes to :func:`download_ncmapss_dataset` when ``version='ncmapss'``, to
-    :func:`_download_ncmapss_hosted` for ``'ncmapss-full'`` and
-    ``'ncmapss-mini'``, otherwise downloads the original C-MAPSS text files.
+    Files already in `save_dir` are not downloaded again. `"ncmapss"` downloads
+    NASA's whole archive (about 16 GB) whatever `datasets` says, and needs
+    `bsdtar`; `"ncmapss-full"` downloads only the sub-datasets asked for.
 
-    The two hosted paths are proportional: they fetch one object per requested
-    sub-dataset. NASA's archive is monolithic, so under ``version='ncmapss'``
-    ``datasets`` scopes the presence check but never the transfer -- which is
-    why ``'ncmapss-full'`` exists.
-
-    On return, every file backing ``datasets`` is present in ``save_dir``.
-    ``datasets=None`` means all sub-datasets, matching the defaults of
-    :func:`get_nasa_train_dataframe` and :func:`get_nasa_test_dataframe`.
+    Args:
+        save_dir: The directory to save the files in.
+        datasets: Which sub-datasets to make sure are present; None means all
+            of them.
+        version: Which dataset, as for `get_nasa_train_dataframe()`.
     """
     if version in _NCMAPSS_HOSTED_VERSIONS:
         _download_ncmapss_hosted(
