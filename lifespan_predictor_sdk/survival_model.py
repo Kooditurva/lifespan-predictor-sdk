@@ -368,23 +368,71 @@ class CategoricalRange:
 
 class SurvivalModel:
     """
-    High-level wrapper for survival analysis models.
+    A DeepSurv survival model: train it, then predict time to failure.
 
-    Simplifies training and prediction with automatic data preprocessing. Where
-    training runs is a matter of configuration; the API is the same either way.
+    A model is built from a config dict and trained with `fit()`. Preprocessing
+    (scaling and the optional engineered features below) is part of the model, so
+    `predict_mean()` and `predict()` take raw feature rows in the same shape as
+    the training data.
 
-    Example:
-        >>> model = SurvivalModel({'model_type': 'deepsurv', 'epochs': 50})
-        >>> model.fit(train_df)
-        >>> mean_times = model.predict_mean(X_test)
+    ```python
+    model = SurvivalModel({
+        "model_type": "deepsurv",
+        "algorithm_arn": os.environ["SAGEMAKER_ALGORITHM_ARN"],
+        "epochs": 30,
+        "num_nodes": [24],
+        "max_rul": 125,
+    })
+    model.fit(train_df, val_split=0.2)
+    model.deploy()
+    mean_times = model.predict_mean(test_df)
+    ```
+
+    ### Hyperparameters
+
+    Every key is optional. A key marked *Range* may also be given as a
+    `ContinuousRange`, `IntegerRange` or `CategoricalRange`, which makes `fit()`
+    tune it (see `fit()`).
+
+    | Key | Type | Default | Range | Meaning |
+    |-----|------|---------|-------|---------|
+    | `model_type` | str | `"deepsurv"` | no | The model. `"deepsurv"` is the one this release offers. |
+    | `epochs` | int | `100` | yes | Maximum training epochs. With validation data, training stops early when the validation loss stops improving. |
+    | `num_nodes` | list of int | `[32, 32]` | yes | Hidden layer sizes, one entry per layer. |
+    | `dropout` | float | `0.1` | yes | Dropout rate after each hidden layer. |
+    | `learning_rate` | float | `0.01` | yes | Initial learning rate. It is reduced when the validation loss plateaus. |
+    | `batch_size` | int | `256` | yes | Rows per training batch. |
+    | `max_rul` | float or None | `None` | yes | Caps the training durations at this value, and limits the C-index to units whose duration is at most this. Common for turbofan data, where early life carries no wear signal. |
+    | `use_delta` | bool | `False` | yes | Adds, for each feature, its change from the unit's previous row. |
+    | `use_per_unit_normalisation` | bool | `False` | yes | Adds, for each feature, its offset from the unit's first row. |
+    | `rolling_means` | list of int or None | `None` | yes | Window sizes; adds, for each feature and window, the unit's rolling mean. |
+    | `calibration` | str or None | `None` | yes | `"isotonic"` calibrates the predicted survival curves on the validation data, so `fit()` then needs `val_df` or `val_split`. |
+    | `n_trials` | int | `2` | no | Tuning only: how many configurations to try. |
+    | `hpo_metric` | str | `"c-index"` | no | Tuning only: the score trials are compared by: `"c-index"`, `"ibs"` (integrated Brier score) or `"antolini"` (time-dependent C-index). |
+    | `verbose` | bool | `False` | no | Tuning only: log each trial in detail. |
+
+    ### SageMaker settings
+
+    Where training runs. They are not hyperparameters and cannot be tuned.
+
+    | Key | Type | If left out | Meaning |
+    |-----|------|-------------|---------|
+    | `algorithm_arn` | str | `SAGEMAKER_ALGORITHM_ARN` is used; without it, `fit()` raises | The ARN of the algorithm you subscribed to. |
+    | `instance_type` | str | `"ml.m5.large"` | The instance type of the training job. |
+    | `bucket` | str | `SAGEMAKER_BUCKET` is used; without it, SageMaker's default bucket for your account and region | The S3 bucket for training data and model artifacts. |
+
+    The job's IAM role is read from the `SAGEMAKER_ROLE_ARN` environment variable,
+    which must be set.
     """
 
     def __init__(self, config):
         """
-        Initialize the survival model with a configuration dictionary.
+        Create an untrained model.
 
         Args:
-            config: Dictionary containing model configuration parameters.
+            config: The model's configuration: hyperparameters and SageMaker
+                settings, as listed in the tables above. Missing keys take their
+                defaults.
         """
         # Minimal shared defaults
         defaults = {
@@ -566,17 +614,89 @@ class SurvivalModel:
         test_labels_df=None,
     ):
         """
-        Train the survival model.
+        Train the model, tuning its hyperparameters first if the config asks.
+
+        **Training once.** When every config value is a plain value, `fit()`
+        trains one model on `train_df` and returns its training log:
+
+        ```python
+        model = SurvivalModel({"model_type": "deepsurv", "epochs": 30})
+        log = model.fit(train_df, val_split=0.2)
+        print(log.best_epochs)
+        ```
+
+        To measure the model, give `fit()` a test set it does not train on, as
+        `test_df` and `test_labels_df`, and read `get_evaluation_result()`.
+        Validation data is no measure: it decides when training stops.
+
+        **Tuning.** When any config value is a `ContinuousRange`, `IntegerRange`
+        or `CategoricalRange`, `fit()` first searches for the best values:
+
+        1. It splits `train_df` into 5 folds with `stratified_kfold`. The number
+           of folds is fixed at 5.
+        2. It tries `n_trials` configurations, each drawn from the ranges and
+           scored by 5-fold cross-validation: trained on four folds,
+           early-stopped on the fifth, scored on that fifth fold by
+           `hpo_metric`, and averaged over the five.
+        3. It retrains on all the training data with the best configuration,
+           and returns that model's training log.
+
+        The trials and the best configuration are then available from
+        `get_tuning_trials()`. `val_df` and `val_split` do not change how trials
+        are scored: each trial is scored on its own folds, and the validation
+        data serves the final training only. With `val_split`, the held-out units
+        are set aside first, so the folds are made from the rest. A config
+        without ranges trains once, with no cross-validation at all.
+
+        Each fold that scores a trial also decided when that trial stopped
+        training, so trial scores lean optimistic. They rank configurations
+        against each other; they do not measure the final model, which a test
+        set does.
+
+        ```python
+        model = SurvivalModel({
+            "model_type": "deepsurv",
+            "learning_rate": ContinuousRange(1e-4, 1e-2, log=True),
+            "num_nodes": CategoricalRange([[16], [32, 32]]),
+            "n_trials": 20,
+        })
+        model.fit(train_df)
+        print(model.get_tuning_trials().best_config)
+        ```
+
+        To search in a way of your own, such as a grid search, see
+        `stratified_kfold`.
+
+        **Data.** Each DataFrame has one row per unit and time step. `train_df`
+        and `val_df` hold `unit` (the unit's ID), `duration` (the time from that
+        row to the unit's failure or censoring), `event` (1 if the unit failed, 0
+        if it was censored) and the feature columns, and may hold `cycles` (the
+        time step). Every column other than `unit`, `cycles`, `duration`,
+        `event` and `group` is a feature.
 
         Args:
-            train_df: Training data as pandas DataFrame
-            val_df: Optional validation DataFrame. Enables early stopping.
-            val_split: Optional float (0-1) to split train_df into train/val.
-            test_df: Optional test samples
-            test_labels_df: Optional test labels with columns [unit, duration, event]
+            train_df: The training data.
+            val_df: Validation data, with the same columns as `train_df`. It
+                drives early stopping and the learning-rate reductions, so it is
+                not a fair set to score the model on. Give either `val_df` or
+                `val_split`, not both.
+            val_split: The fraction of `train_df`'s units (0 to 1) to hold out
+                as validation data instead, split by unit and balanced on event
+                rate and duration.
+            test_df: Test samples: rows of feature columns with `unit`, without
+                labels. Needs `test_labels_df`.
+            test_labels_df: One row per test unit, with `unit`, `duration` (the
+                remaining life at the unit's last row in `test_df`) and `event`.
+                With `test_df`, the model is evaluated after training, and
+                `get_evaluation_result()` returns the scores.
 
         Returns:
-            TrainingLog with loss history and metrics
+            The `TrainingLog` of the model that was trained: of the single
+            training, or of the final training after tuning.
+
+        Raises:
+            ValueError: If both `val_df` and `val_split` are given, or if
+                `calibration` is `"isotonic"` and there is no validation data.
         """
         if val_df is not None and val_split is not None:
             raise ValueError(
@@ -625,14 +745,24 @@ class SurvivalModel:
 
     def predict_mean(self, X, **kwargs):
         """
-        Predict mean survival time (expected time to event).
+        Predict each row's mean time to failure.
+
+        Runs a batch transform job, or uses the real-time endpoint if `deploy()`
+        created one.
 
         Args:
-            X: Features (DataFrame or array)
-            **kwargs: Backend-specific params (model_name, instance_type, etc.)
+            X: Feature rows, a DataFrame with `unit` and the training data's
+                feature columns, and no labels.
+            **kwargs: Batch transform options: `model_name` (default: the model
+                `deploy()` created), `instance_type` (default `"ml.m5.large"`),
+                `instance_count` (default 1), `wait` (default True) and
+                `max_payload` in MB (default 6).
 
         Returns:
-            numpy array of mean survival times, one per sample
+            A numpy array of mean times to failure, one per row of `X`.
+
+        Raises:
+            ValueError: If the model has not been fitted.
         """
         if not self._is_fitted:
             raise ValueError(
@@ -642,15 +772,19 @@ class SurvivalModel:
 
     def predict(self, X, time_points=None):
         """
-        Predict survival curves for new samples.
+        Predict each row's survival curve.
+
+        Runs the same job as `predict_mean()`.
 
         Args:
-            X: Features
-            time_points: Optional time points for survival curves
+            X: Feature rows, as for `predict_mean()`.
+            time_points: Times to return the curves at. They select times from
+                the model's own time grid; values are not interpolated. Without
+                them, the whole grid is returned.
 
         Returns:
-            pandas DataFrame with survival probabilities, indexed by time under
-            the name ``duration``, one column per input sample.
+            A DataFrame of survival probabilities, indexed by time under the name
+            `duration`, with one column per row of `X`.
         """
         curves = self._backend.predict(self, X, time_points=time_points)
 
@@ -674,15 +808,24 @@ class SurvivalModel:
 
     def evaluate(self, X, durations, events):
         """
-        Evaluate model performance using C-index, RMSE, and calibration metrics.
+        Score the model on labelled data.
+
+        Typically `X` is a test set's last row per unit, and `durations` and
+        `events` its labels. With `max_rul` set, the C-index counts only units
+        whose duration is at most `max_rul`.
 
         Args:
-            X: Features (numpy array or pandas DataFrame)
-            durations: Time to event or censoring (1D array)
-            events: Event indicators (1=event, 0=censored) (1D array)
+            X: Feature rows, as for `predict_mean()`.
+            durations: For each row of `X`, the time to failure or censoring.
+            events: For each row of `X`, 1 if the unit failed and 0 if it was
+                censored.
 
         Returns:
-            EvaluationResult with c_index, rmse, and calibration metrics
+            An `EvaluationResult` with the C-index, RMSE, calibration and
+            integrated Brier score.
+
+        Raises:
+            ValueError: If the model has not been fitted.
         """
         if not self._is_fitted:
             raise ValueError(
@@ -869,7 +1012,15 @@ class SurvivalModel:
 
 
     def get_mean_time_to_failure(self, X):
-        """Alias for predict_mean()."""
+        """
+        The same as `predict_mean()`.
+
+        Args:
+            X: Feature rows, as for `predict_mean()`.
+
+        Returns:
+            A numpy array of mean times to failure, one per row of `X`.
+        """
         return self.predict_mean(X)
 
     def _predict_all_rows(self, df):
@@ -899,29 +1050,50 @@ class SurvivalModel:
     # ------------------------------------------------------------------
 
     def deploy(self, model_name=None, endpoint_instance_type=None):
-        """Create SageMaker Model for batch transform inference.
+        """
+        Make the trained model available for prediction on SageMaker.
 
-        With ``endpoint_instance_type`` (e.g. ``"ml.m5.large"``), also host it on
-        a real-time endpoint, which predictions then use until ``delete()``.
+        By default this creates a SageMaker model that `predict_mean()` and
+        `predict()` run batch transform jobs against. With
+        `endpoint_instance_type`, it also hosts the model on a real-time endpoint,
+        which predictions then use until `delete()`. An endpoint is billed for as
+        long as it exists.
+
+        Args:
+            model_name: The name of the SageMaker model. Without it, a name is
+                derived from the algorithm's.
+            endpoint_instance_type: The instance type of a real-time endpoint,
+                such as `"ml.m5.large"`. Without it, no endpoint is created.
+
+        Returns:
+            The name of the SageMaker model.
         """
         return self._backend.deploy(
             self, model_name=model_name, endpoint_instance_type=endpoint_instance_type
         )
 
     def delete(self):
-        """Delete the SageMaker model, and its endpoint if deploy() created one."""
-        return self._backend.delete(self)
+        """Delete what `deploy()` created: the SageMaker model, and its endpoint."""
+        self._backend.delete(self)
 
     def print_training_job_summary(self):
-        """Print a summary of the most recent SageMaker training job."""
-        return self._backend.print_training_job_summary(self)
+        """Print a summary of the model's SageMaker training job."""
+        self._backend.print_training_job_summary(self)
 
     # ------------------------------------------------------------------
     # Shared accessors
     # ------------------------------------------------------------------
 
     def get_training_log(self):
-        """Get the training log."""
+        """
+        The training log of the last `fit()`.
+
+        Returns:
+            The same `TrainingLog` `fit()` returned.
+
+        Raises:
+            ValueError: If the model has not been fitted.
+        """
         if not self._is_fitted:
             raise ValueError(
                 "Model must be fitted before accessing training log. Call fit() first."
@@ -933,11 +1105,22 @@ class SurvivalModel:
         return self._training_log
 
     def get_tuning_trials(self):
-        """Return HPO tuning trials, or None if no HPO was performed."""
+        """
+        The results of the tuning `fit()` ran.
+
+        Returns:
+            A `TuningTrials`, or None if the config had no ranges and `fit()`
+            did not tune.
+        """
         return getattr(self, "_tuning_trials", None)
 
     def get_config(self):
-        """Return the config used for training."""
+        """
+        The model's config, with defaults filled in.
+
+        Returns:
+            The config dict.
+        """
         return self.config
 
     def print_config(self):

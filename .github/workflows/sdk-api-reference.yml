@@ -1,0 +1,73 @@
+name: SDK API Reference
+
+# Publishes the API reference to GitHub Pages: one page, built with pdoc from the
+# package's docstrings at a released tag.
+#
+# Runs when a release becomes a full release ("released"), never for a
+# pre-release, so the page documents the version buyers are told to install.
+# Run it by hand with a tag to rebuild a release's page.
+#
+# A release event runs on its tag, not on main, so the repository's
+# github-pages environment must allow deployments from v* tags.
+
+on:
+  release:
+    types: [released]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to document, e.g. v1.0.3'
+        required: true
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer release waits rather than cancelling one
+# that is half-deployed.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install the package and pdoc
+        run: |
+          python -m pip install --upgrade pip
+          pip install . pdoc==15.0.1
+
+      # The package alone, without its submodules: everything a buyer uses is
+      # exported from it. -W error fails the build on any warning.
+      - name: Build the reference
+        run: python -W error -m pdoc --docformat google -o site lifespan_predictor_sdk '!lifespan_predictor_sdk.'
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

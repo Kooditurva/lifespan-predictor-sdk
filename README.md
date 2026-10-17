@@ -55,6 +55,14 @@ SDK version `X.Y.Z` is the algorithm version it was tested against, and works
 with algorithm version `X.Y.*`. A mismatched major.minor produces a warning at
 training time.
 
+## API Reference
+
+**[kooditurva.github.io/lifespan-predictor-sdk](https://kooditurva.github.io/lifespan-predictor-sdk/)**
+documents every class and function the package exports: the model's
+configuration keys, how `fit()` trains once or tunes, the result types, and how
+to run a hyperparameter search of your own. It is built from the latest
+release.
+
 ## Quick Start
 
 Subscribe to a product (see [Which product?](#which-product)), set your
