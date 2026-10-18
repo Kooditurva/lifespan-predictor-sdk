@@ -8,7 +8,9 @@ coming soon.
 ## Which product?
 
 The algorithm is sold on AWS Marketplace as two products. **The same SDK works
-with both**; only the algorithm ARN you pass it differs.
+with both**; only the algorithm ARN you pass it differs. The
+[product page](https://kooditurva.github.io/kooditurva-static/lifespan-predictor/video/)
+has a demo video and links to both.
 
 - **Free Tier Lifespan Predictor**: public, with no software charge. Training is
   capped at **100 units**, counted as distinct values of the `unit` column in
@@ -36,24 +38,25 @@ You pay AWS for the SageMaker instances your jobs run on, with either product.
 
 ```bash
 # Install the wheel directly
-pip install "https://github.com/kooditurva/lifespan-predictor-sdk/releases/download/v1.0.3/lifespan_predictor-1.0.3-py3-none-any.whl"
+pip install "https://github.com/kooditurva/lifespan-predictor-sdk/releases/download/v1.0.3.post1/lifespan_predictor-1.0.3.post1-py3-none-any.whl"
 
 # Or add to an existing uv project
-uv add "lifespan-predictor @ git+https://github.com/kooditurva/lifespan-predictor-sdk@v1.0.3"
+uv add "lifespan-predictor @ git+https://github.com/kooditurva/lifespan-predictor-sdk@v1.0.3.post1"
 ```
 
 See the [Releases page](https://github.com/kooditurva/lifespan-predictor-sdk/releases)
 for other versions, and [CHANGELOG.md](./CHANGELOG.md) for what each one changed.
 
 **Install a release.** Every tag has passed the SDK's tests and its sample
-notebook against the free tier of the same algorithm version. One still marked
-as a pre-release has passed them, but has not been released yet.
+notebook against the free tier of the algorithm version it names. A tag with no
+published release has passed them, but has not been released yet.
 
 ## Version Alignment
 
 SDK version `X.Y.Z` is the algorithm version it was tested against, and works
-with algorithm version `X.Y.*`. A mismatched major.minor produces a warning at
-training time.
+with algorithm version `X.Y.*`. A version such as `X.Y.Z.post1` is a re-release
+of the SDK alone, for the same algorithm version. A mismatched major.minor
+produces a warning at training time.
 
 ## API Reference
 
@@ -145,7 +148,7 @@ endpoint, then cleanup. It fits the free tier, needs the environment variables
 from the [Quick Start](#quick-start), and submits billed SageMaker jobs.
 
 [See it with the output of the run that tested
-v1.0.3](https://github.com/Kooditurva/lifespan-predictor-sdk/blob/v1.0.3/examples/sagemaker_training_demo.ipynb)
+v1.0.3.post1](https://github.com/Kooditurva/lifespan-predictor-sdk/blob/v1.0.3.post1/examples/sagemaker_training_demo.ipynb)
 before running it yourself.
 
 ## Running the Tests
@@ -177,13 +180,14 @@ The `SDK Cloud Tests` workflow runs the same script. To run it in a fork, set th
 
 The `SDK Cloud Tests` workflow, run by hand on `main`, is the only thing that
 tags. It runs the local tests, the cloud tests and the sample notebook against
-the free tier, and when all pass it tags `vX.Y.Z` and publishes a pre-release
+the free tier, and when all pass it tags `vX.Y.Z` and creates a draft release
 with the tested wheel. The tag's commit adds the notebook's recorded outputs to
-the tested one. A maintainer then marks the pre-release as a release. A released
-version never moves.
+the tested one. A maintainer then publishes the draft. Releases here are
+immutable, so a published version never moves; until then, a rerun replaces the
+draft and its tag.
 
-If the tests pass but publishing fails, use "Re-run failed jobs" on the run. It
-reruns only the publish, with the wheel and the notebook the tests produced.
+If the tests pass but creating the draft fails, use "Re-run failed jobs" on the
+run. It reruns only that job, with the wheel and the notebook the tests produced.
 
 ## License
 
