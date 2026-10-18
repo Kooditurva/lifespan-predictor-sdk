@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lifespan-predictor"
-version = "1.0.3"
+version = "1.0.3.post1"
 description = "Lifespan Predictor SDK - Survival Analysis with Deep Learning via AWS SageMaker"
 requires-python = ">=3.12"
 license = "MIT"
