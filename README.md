@@ -9,8 +9,8 @@ coming soon.
 
 The algorithm is sold on AWS Marketplace as two products. **The same SDK works
 with both**; only the algorithm ARN you pass it differs. The
-[product page](https://kooditurva.github.io/kooditurva-static/lifespan-predictor/video/)
-has a demo video and links to both.
+[product page](https://kooditurva.fi/docs/lifespan-predictor/?utm_source=github&utm_medium=sdk-readme&utm_campaign=lifespan-predictor-launch&utm_content=lifespan-predictor-sdk)
+has a demo video, the free tier's listing, and a contact form for the paid product.
 
 - **Free Tier Lifespan Predictor**: public, with no software charge. Training is
   capped at **100 units**, counted as distinct values of the `unit` column in
