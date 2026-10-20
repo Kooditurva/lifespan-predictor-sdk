@@ -1,0 +1,8 @@
+{# The package page: pdoc's own, with a title and head search engines can use. #}
+{% extends "default/module.html.jinja2" %}
+{% import "page-meta.html.jinja2" as page_meta %}
+{% block title %}{{ page_meta.title }}{% endblock %}
+{% block head %}
+    {{ super() }}
+    {{ page_meta.head() }}
+{% endblock %}
