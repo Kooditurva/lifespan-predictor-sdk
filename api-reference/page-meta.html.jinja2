@@ -1,0 +1,13 @@
+{#
+What search engines read about the reference. Imported by both pages, so the
+redirect at the site root and the page it opens describe the SDK alike.
+Name only the models the released SDK offers.
+#}
+{% set title = "Lifespan Predictor SDK: survival analysis on Amazon SageMaker" %}
+{% set description = "Python SDK for Lifespan Predictor: train DeepSurv survival models on Amazon SageMaker to predict time to failure or churn from your own data." %}
+{% set canonical = "https://kooditurva.github.io/lifespan-predictor-sdk/lifespan_predictor_sdk.html" %}
+
+{% macro head() %}
+    <meta name="description" content="{{ description }}">
+    <link rel="canonical" href="{{ canonical }}">
+{% endmacro %}

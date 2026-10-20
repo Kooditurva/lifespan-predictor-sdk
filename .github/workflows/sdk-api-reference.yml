@@ -37,6 +37,20 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
 
+      # The page templates come from the commit this workflow runs on, not from
+      # the tag: the package is the release's, the page around it is current, so
+      # a hand-run rebuild of an older release gets today's templates.
+      - uses: actions/checkout@v4
+        with:
+          path: workflow-ref
+          sparse-checkout: api-reference
+
+      - name: Use the current page templates
+        run: |
+          rm -rf api-reference
+          mv workflow-ref/api-reference api-reference
+          rm -rf workflow-ref
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -48,9 +62,35 @@ jobs:
           pip install . pdoc==15.0.1
 
       # The package alone, without its submodules: everything a buyer uses is
-      # exported from it. -W error fails the build on any warning.
+      # exported from it. -W error fails the build on any warning. The templates
+      # in api-reference/ give the pages a title and description search engines
+      # can show.
       - name: Build the reference
-        run: python -W error -m pdoc --docformat google -o site lifespan_predictor_sdk '!lifespan_predictor_sdk.'
+        run: python -W error -m pdoc --docformat google -t api-reference -o site lifespan_predictor_sdk '!lifespan_predictor_sdk.'
+
+      # A sitemap to submit in Google Search Console and, when the repository
+      # variable GOOGLE_SITE_VERIFICATION holds Search Console's token (such as
+      # google0123abcd), the file that proves the site is ours. The token
+      # reaches the shell only as an environment variable, and anything but
+      # that form fails the build rather than becoming a file name.
+      - name: Add the sitemap and the Search Console file
+        env:
+          GOOGLE_SITE_VERIFICATION: ${{ vars.GOOGLE_SITE_VERIFICATION }}
+        run: |
+          cat > site/sitemap.xml <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+            <url><loc>https://kooditurva.github.io/lifespan-predictor-sdk/lifespan_predictor_sdk.html</loc></url>
+          </urlset>
+          EOF
+          if [ -n "$GOOGLE_SITE_VERIFICATION" ]; then
+            if [[ ! "$GOOGLE_SITE_VERIFICATION" =~ ^google[0-9a-f]+$ ]]; then
+              echo "GOOGLE_SITE_VERIFICATION must look like google0123abcd" >&2
+              exit 1
+            fi
+            # printf, not echo: the same bytes as the file Search Console hands out.
+            printf 'google-site-verification: %s.html' "$GOOGLE_SITE_VERIFICATION" > "site/$GOOGLE_SITE_VERIFICATION.html"
+          fi
 
       - uses: actions/upload-pages-artifact@v3
         with:

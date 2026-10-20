@@ -17,8 +17,8 @@ has a demo video, the free tier's listing, and a contact form for the paid produ
   your training data. Validation data, test data and inference are not capped.
   A training job over the cap fails before training starts, with a
   `FailureReason` naming the limit.
-- **Lifespan Predictor**: no cap, hourly pricing with a free trial. It is
-  offered privately: contact **info@kooditurva.fi**.
+- **Lifespan Predictor**: no cap. It is offered privately: contact
+  **info@kooditurva.fi**.
 
 Subscribe to a product on AWS Marketplace, then train against its algorithm ARN
 for your region. Every subscriber in a region uses the same ARN; your

@@ -1,0 +1,14 @@
+{#
+The site root. pdoc's default is a bare redirect to the package page; this keeps
+the redirect, which search engines follow, and gives it the page's own head.
+#}
+{% import "page-meta.html.jinja2" as page_meta %}
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>{{ page_meta.title }}</title>
+    {{ page_meta.head() }}
+    <meta http-equiv="refresh" content="0; url=./{{ root_module_name.replace(".","/") }}.html"/>
+</head>
+</html>
