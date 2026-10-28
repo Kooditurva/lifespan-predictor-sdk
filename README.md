@@ -9,7 +9,7 @@ coming soon.
 
 The algorithm is sold on AWS Marketplace as two products. **The same SDK works
 with both**; only the algorithm ARN you pass it differs. The
-[product page](https://kooditurva.fi/docs/lifespan-predictor/?utm_source=github&utm_medium=sdk-readme&utm_campaign=lifespan-predictor-launch&utm_content=lifespan-predictor-sdk)
+[product page](https://kooditurva.fi/lifespan-predictor/?utm_source=github&utm_medium=sdk-readme&utm_campaign=lifespan-predictor-launch&utm_content=lifespan-predictor-sdk)
 has a demo video, the free tier's listing, and a contact form for the paid product.
 
 - **Free Tier Lifespan Predictor**: public, with no software charge. Training is
@@ -26,7 +26,7 @@ subscription is what grants access to it.
 
 | Product | Region | Algorithm ARN |
 |---|---|---|
-| Free Tier Lifespan Predictor | `eu-west-1` | `arn:aws:sagemaker:eu-west-1:985815980388:algorithm/free-tier-lifespan-predictor-m-a4152a6179703e9aadf7785d54319a8b` |
+| Free Tier Lifespan Predictor | `eu-west-1` | `arn:aws:sagemaker:eu-west-1:985815980388:algorithm/free-tier-lifespan-predictor-m-25f11987ba043299a755d4e16601168e` |
 
 To find the ARN in the AWS console instead: open **AWS Marketplace → Manage
 subscriptions**, choose the product, then **Continue to configuration**, and
@@ -38,10 +38,10 @@ You pay AWS for the SageMaker instances your jobs run on, with either product.
 
 ```bash
 # Install the wheel directly
-pip install "https://github.com/kooditurva/lifespan-predictor-sdk/releases/download/v1.0.3.post1/lifespan_predictor-1.0.3.post1-py3-none-any.whl"
+pip install "https://github.com/kooditurva/lifespan-predictor-sdk/releases/download/v1.1.0/lifespan_predictor-1.1.0-py3-none-any.whl"
 
 # Or add to an existing uv project
-uv add "lifespan-predictor @ git+https://github.com/kooditurva/lifespan-predictor-sdk@v1.0.3.post1"
+uv add "lifespan-predictor @ git+https://github.com/kooditurva/lifespan-predictor-sdk@v1.1.0"
 ```
 
 See the [Releases page](https://github.com/kooditurva/lifespan-predictor-sdk/releases)
@@ -74,7 +74,7 @@ dataset. The ARN below is the free tier's in `eu-west-1`; use the one for your
 product and region.
 
 ```bash
-export SAGEMAKER_ALGORITHM_ARN='arn:aws:sagemaker:eu-west-1:985815980388:algorithm/free-tier-lifespan-predictor-m-a4152a6179703e9aadf7785d54319a8b'
+export SAGEMAKER_ALGORITHM_ARN='arn:aws:sagemaker:eu-west-1:985815980388:algorithm/free-tier-lifespan-predictor-m-25f11987ba043299a755d4e16601168e'
 export SAGEMAKER_ROLE_ARN='arn:aws:iam::ACCOUNT:role/service-role/YOUR-SageMaker-ExecutionRole'
 # Optional: the S3 bucket for training data and model artifacts. Without it,
 # SageMaker's default bucket for your account and region is used.
@@ -139,6 +139,39 @@ model.delete()                                     # stops the endpoint's billin
 > `DeleteEndpointConfig`. A real-time request is limited to 6 MB; use batch
 > transform for larger inputs.
 
+### An interpretable model: `coxph`
+
+With few failures to learn from, a neural network is hard to trust. `"coxph"` is a
+penalised linear Cox model: each feature's effect on risk is one number you can
+read. `coxph_penalizer` and `coxph_l1_ratio` set its penalty, and both can be tuned.
+
+```python
+model = SurvivalModel({
+    "model_type": "coxph",
+    "algorithm_arn": os.environ["SAGEMAKER_ALGORITHM_ARN"],
+    "max_rul": 125,
+    "coxph_penalizer": 0.1,
+})
+model.fit(train_df, val_split=0.2, test_df=test_df, test_labels_df=test_labels_df)
+
+effects = model.get_global_analysis()    # how the model acts on any unit
+effects.feature_effects                  # each feature's effect on the log-hazard
+effects.plot_hazard_ratios()
+
+model.deploy()
+model.predict(test_df)
+local = model.get_local_analysis()       # what drives each predicted unit's risk
+local.top_drivers(local.feature_groups())
+local.cluster_units(2)                   # units at risk for the same reason
+model.delete()
+```
+
+`get_global_analysis()` gives the coefficients, hazard ratios with their
+intervals, and a proportional-hazards test. `get_local_analysis()` splits each
+predicted unit's risk exactly into the features that raise or lower it. Its
+methods group features that carry the same information, name each unit's top
+driver, and cluster units whose risk has the same explanation.
+
 ## Examples
 
 [`sagemaker_training_demo.ipynb`](examples/sagemaker_training_demo.ipynb) runs the
@@ -148,8 +181,21 @@ endpoint, then cleanup. It fits the free tier, needs the environment variables
 from the [Quick Start](#quick-start), and submits billed SageMaker jobs.
 
 [See it with the output of the run that tested
-v1.0.3.post1](https://github.com/Kooditurva/lifespan-predictor-sdk/blob/v1.0.3.post1/examples/sagemaker_training_demo.ipynb)
+v1.1.0](https://github.com/Kooditurva/lifespan-predictor-sdk/blob/v1.1.0/examples/sagemaker_training_demo.ipynb)
 before running it yourself.
+
+[`sagemaker_coxph_demo.ipynb`](examples/sagemaker_coxph_demo.ipynb) does the same
+with the `coxph` model. It tunes its penalty, reads both analyses on the same
+turbofan data, and explains what drives each engine's risk. It fits the free tier
+too, and submits billed SageMaker jobs: three training jobs and one batch
+transform.
+
+[`sagemaker_coxph_fd003_demo.ipynb`](examples/sagemaker_coxph_fd003_demo.ipynb)
+trains the same model on FD003, whose engines fail in one of two ways, and finds
+the two failure modes: it groups the sensors with `feature_groups()`, clusters
+the riskiest engines by their explanations with `cluster_units()`, and checks
+the clusters against the raw sensor drift. One training job and one batch
+transform.
 
 ## Running the Tests
 
@@ -166,7 +212,7 @@ python scripts/run_cloud_tests.py
 It builds the wheel, installs it in a fresh virtual environment, runs the local
 tests, and then the cloud tests against the installed wheel. The cloud tests
 start SageMaker training and batch transform jobs in your account, which are
-billed. With `--notebook` it then runs `examples/sagemaker_training_demo.ipynb` too,
+billed. With `--notebook` it then runs the three notebooks in `examples/` too,
 as a release does. Without `SAGEMAKER_ALGORITHM_ARN` it uses the free tier's ARN in
 `eu-west-1`. Arguments after `--` go to pytest, for example
 `python scripts/run_cloud_tests.py -- -k inference`.

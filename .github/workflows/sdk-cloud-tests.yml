@@ -1,12 +1,12 @@
 name: SDK Cloud Tests
 
 # The release. Run by hand on main: the local tests, the cloud tests and the
-# sample notebook against the free tier, then, when all pass, tag vX.Y.Z and
+# example notebooks against the free tier, then, when all pass, tag vX.Y.Z and
 # create a draft release with the tested wheel. A maintainer publishes it in
 # GitHub; publishing is permanent, because releases here are immutable. On any
 # other branch it tests and drafts nothing.
 #
-# Two jobs. cloud-tests keeps the tested wheel and the recorded notebook as
+# Two jobs. cloud-tests keeps the tested wheel and the recorded notebooks as
 # this run's artifact; publish fetches them. If only publish fails, "Re-run
 # failed jobs" reruns it alone, without paying for the tests again.
 #
@@ -72,21 +72,23 @@ jobs:
       # scripts/run_cloud_tests.py is what anyone with a clone runs: one way to
       # run these tests, not two. It builds the wheel into dist/, runs the local
       # tests against it before anything is billed, then the cloud tests, then
-      # the sample notebook, whose cleaned outputs it writes in place.
-      - name: Run the tests and the sample notebook
+      # the example notebooks, whose cleaned outputs it writes in place.
+      - name: Run the tests and the example notebooks
         env:
           SAGEMAKER_ALGORITHM_ARN: ${{ steps.resolve_arn.outputs.arn }}
           SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
           SAGEMAKER_BUCKET: ${{ vars.SAGEMAKER_BUCKET }}
         run: python scripts/run_cloud_tests.py run --notebook
 
-      - name: Keep the tested wheel and the recorded notebook
+      - name: Keep the tested wheel and the recorded notebooks
         uses: actions/upload-artifact@v4
         with:
           name: tested-release
           path: |
             dist/*.whl
             examples/sagemaker_training_demo.ipynb
+            examples/sagemaker_coxph_demo.ipynb
+            examples/sagemaker_coxph_fd003_demo.ipynb
           if-no-files-found: error
 
   publish:
@@ -107,7 +109,7 @@ jobs:
           python-version: '3.12'
 
       # Into dist/ and examples/, where cloud-tests left them.
-      - name: Fetch the tested wheel and the recorded notebook
+      - name: Fetch the tested wheel and the recorded notebooks
         uses: actions/download-artifact@v4
         with:
           name: tested-release
