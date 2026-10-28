@@ -17,7 +17,13 @@ name: SDK Cloud Tests
 #       the algorithm ARN of your Marketplace subscription. Defaults to the
 #       free tier's in eu-west-1. The region is read from it.
 #   AWS_ROLE_ARN secret:        a role this repository may assume through
-#                               GitHub OIDC.
+#                               GitHub OIDC. The run signs in for three
+#                               hours, so the role's MaxSessionDuration
+#                               must be at least 10800 seconds.
+#   AWS_SESSION_SECONDS variable: optional; the session's length in seconds,
+#                               10800 if unset. Set it lower if your role
+#                               allows less, though the run may then not
+#                               finish its notebooks.
 #   SAGEMAKER_ROLE_ARN secret:  the SageMaker execution role your jobs run as.
 #   SAGEMAKER_BUCKET variable:  optional; SageMaker's default bucket otherwise.
 
@@ -68,6 +74,8 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ steps.resolve_arn.outputs.region }}
+          # The tests and three example notebooks outlast the default hour.
+          role-duration-seconds: ${{ vars.AWS_SESSION_SECONDS || '10800' }}
 
       # scripts/run_cloud_tests.py is what anyone with a clone runs: one way to
       # run these tests, not two. It builds the wheel into dist/, runs the local
