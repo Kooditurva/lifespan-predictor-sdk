@@ -6,7 +6,7 @@
 
 `check` runs before anything is billed: it stops the run if this version has a
 published release. `draft` runs after the local tests, the cloud tests and the
-sample notebook have passed. It commits the notebook's recorded outputs on top
+example notebooks have passed. It commits the notebooks' recorded outputs on top
 of the tested commit, tags that commit `vX.Y.Z`, and creates a draft release
 with the wheel in dist/. A draft of the same version, from an earlier run, is
 replaced with its tag.
@@ -32,7 +32,12 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-NOTEBOOK = "examples/sagemaker_training_demo.ipynb"
+# Every example the run recorded, committed under the tag.
+NOTEBOOKS = [
+    "examples/sagemaker_training_demo.ipynb",
+    "examples/sagemaker_coxph_demo.ipynb",
+    "examples/sagemaker_coxph_fd003_demo.ipynb",
+]
 # A runner has no git identity, and the commit and the annotated tag both need one.
 AS_BOT = [
     "git",
@@ -118,17 +123,17 @@ def release_notes(version, algorithm_arn, tested_commit, root=ROOT):
     return (
         f"{text}\n"
         f"Tested on {today} against `{algorithm_arn}`: commit {tested_commit} passed "
-        "the local tests, the cloud tests and the sample notebook. The tag's commit "
-        "adds the notebook's recorded outputs to it.\n"
+        "the local tests, the cloud tests and the example notebooks. The tag's commit "
+        "adds the notebooks' recorded outputs to it.\n"
     )
 
 
 def draft(version, algorithm_arn, tested_commit, run=_run, root=ROOT):
-    """Commit the recorded notebook, tag it v{version}, create a draft release."""
+    """Commit the recorded notebooks, tag it v{version}, create a draft release."""
     state = check(version, run)
 
     tag = f"v{version}"
-    _must(run, ["git", "add", NOTEBOOK])
+    _must(run, ["git", "add", *NOTEBOOKS])
     _must(
         run,
         [
@@ -136,7 +141,7 @@ def draft(version, algorithm_arn, tested_commit, run=_run, root=ROOT):
             "commit",
             "--allow-empty",
             "-m",
-            f"Record the sample notebook's run against {algorithm_arn}",
+            f"Record the example notebooks' runs against {algorithm_arn}",
         ],
     )
     if state == "draft":

@@ -29,6 +29,11 @@ INTERNAL_CONFIG_KEYS = frozenset(
 )
 
 
+# `verbose` would print every tuning fold's training log. A training job refuses
+# it, in this client and in the training container both.
+VERBOSE_NOT_SUPPORTED = "`verbose` is not supported in this version."
+
+
 def without_internal_keys(config: dict) -> dict:
     """`config` with only its hyperparameters."""
     return {k: v for k, v in config.items() if k not in INTERNAL_CONFIG_KEYS}
@@ -151,7 +156,8 @@ class TuningTrials:
 
     Attributes:
         best_config: The config of the best trial, with every range replaced by
-            its best value. This is the config `fit()` retrained with.
+            its best value and without `n_trials`. This is the config `fit()`
+            retrained with.
     """
 
     def __init__(self, trials: list):

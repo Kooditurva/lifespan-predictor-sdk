@@ -100,6 +100,63 @@ def load_tuning_trials(s3, model_data_uri: str, config: dict):
 _MODEL_PACKAGE_PENDING_STATUSES = frozenset({"Pending", "InProgress", "Deleting"})
 
 
+def _evaluation_result_from_metrics(metrics, calibration_curves=None):
+    """The `EvaluationResult` a training job's `metrics.json` describes.
+
+    The job keeps no per-unit arrays, so the counts behind the scoring basis come
+    across as numbers, and `report()` states the basis just as `evaluate()`'s does.
+    `calibration_curves` holds the arrays of the job's `calibration_curve.npz`.
+    """
+    curves = calibration_curves or {}
+    from lifespan_predictor_sdk.training_log import EvaluationResult
+
+    keys = (
+        "ipcw_c_index",
+        "antolini_c_index",
+        "calibration_bias",
+        "calibration_mean_cdf",
+        "calibration_classification",
+        "ibs",
+        "ibs_classification",
+        "n_scored",
+        "n_capped",
+        "n_rmse",
+        "n_calibration",
+        "max_rul",
+    )
+    return EvaluationResult(
+        c_index=metrics["c_index"],
+        rmse=metrics.get("rmse"),
+        calibration_sorted_cdf=curves.get("sorted_cdf"),
+        calibration_empirical_cdf=curves.get("empirical_cdf"),
+        calibration_sorted_cdf_events=curves.get("sorted_cdf_events"),
+        calibration_empirical_cdf_events=curves.get("empirical_cdf_events"),
+        **{key: metrics.get(key) for key in keys},
+    )
+
+
+def _global_analysis_from_metrics(metrics):
+    """The `GlobalAnalysis` a training job's `metrics.json` holds, or None."""
+    if "global_analysis" not in metrics:
+        return None
+    from lifespan_predictor_sdk.training_log import GlobalAnalysis
+
+    return GlobalAnalysis.from_dict(metrics["global_analysis"])
+
+
+def _default_model_name(model_type):
+    """The name deploy() gives a model when the caller gives none.
+
+    The model type and a timestamp, e.g. ``deepsurv-2026-10-26-15-49-58-123``.
+    Every deploy gets its own: a name shared by all deploys of one algorithm
+    version let the second delete the first one's model. SageMaker names allow
+    no underscore.
+    """
+    from sagemaker.utils import name_from_base
+
+    return name_from_base(model_type.replace("_", "-"))
+
+
 def _validate_sagemaker_role():
     """
     Validate that SAGEMAKER_ROLE_ARN environment variable is set.
@@ -214,6 +271,11 @@ class SageMakerBackend:
         # Raw data goes out as-is; the container does every transformation
         # Container will load CSV, initialize preprocessor, and preprocess during training
 
+        from lifespan_predictor_sdk.hpo_io import VERBOSE_NOT_SUPPORTED
+
+        if model.config.get("verbose"):
+            raise ValueError(VERBOSE_NOT_SUPPORTED)
+
         try:
             import boto3
             import sagemaker
@@ -224,7 +286,7 @@ class SageMakerBackend:
                 "Install with: uv add boto3 sagemaker"
             )
 
-        from lifespan_predictor_sdk.training_log import EvaluationResult, TrainingLog
+        from lifespan_predictor_sdk.training_log import TrainingLog
 
         print("🚀 Starting SageMaker training...")
 
@@ -375,7 +437,7 @@ class SageMakerBackend:
         train_loss = []
         val_loss = []
         learning_rate = []
-        epochs = model.config["epochs"]
+        epochs = model.config.get("epochs")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             local_tar_path = os.path.join(tmpdir, "model.tar.gz")
@@ -393,12 +455,12 @@ class SageMakerBackend:
                     train_loss = log_data.get("train_loss", [])
                     val_loss = log_data.get("val_loss", [])
                     learning_rate = log_data.get("learning_rate", [])
-                    epochs = log_data.get("epochs", model.config["epochs"])
+                    epochs = log_data.get("epochs", epochs)
             else:
                 print("⚠ Training log not found in model artifact")
                 # Fallback values if log not found
                 learning_rate = (
-                    [model.config["learning_rate"]] * len(train_loss)
+                    [model.config.get("learning_rate")] * len(train_loss)
                     if train_loss
                     else []
                 )
@@ -415,6 +477,8 @@ class SageMakerBackend:
             if os.path.exists(metrics_path):
                 with open(metrics_path, "r") as f:
                     metrics = json.load(f)
+
+                    model._global_analysis = _global_analysis_from_metrics(metrics)
 
                     # Store evaluation metrics if present
                     if "c_index" in metrics:
@@ -443,7 +507,7 @@ class SageMakerBackend:
             cal_curve_data = None
             if os.path.exists(cal_path):
                 data = np.load(cal_path, allow_pickle=True)
-                cal_curve_data = (data["sorted_cdf"], data["empirical_cdf"])
+                cal_curve_data = {name: data[name] for name in data.files}
 
         tuning_trials = load_tuning_trials(s3, model_data_uri, model.config)
         if tuning_trials is not None:
@@ -464,21 +528,8 @@ class SageMakerBackend:
 
         # Store evaluation result if metrics were available
         if test_c_index is not None:
-            sorted_cdf, empirical_cdf = (
-                cal_curve_data if cal_curve_data else (None, None)
-            )
             model._evaluation_results = {
-                "after": EvaluationResult(
-                    c_index=test_c_index,
-                    rmse=test_rmse,
-                    calibration_bias=test_calibration_bias,
-                    calibration_mean_cdf=test_calibration_mean_cdf,
-                    calibration_classification=test_calibration_classification,
-                    calibration_sorted_cdf=sorted_cdf,
-                    calibration_empirical_cdf=empirical_cdf,
-                    ibs=test_ibs,
-                    ibs_classification=test_ibs_classification,
-                )
+                "after": _evaluation_result_from_metrics(metrics, cal_curve_data)
             }
 
         return training_log
@@ -650,7 +701,18 @@ class SageMakerBackend:
         return self._collect(model, [json.loads(response["Body"].read())])
 
     def _collect(self, model, responses):
-        """Mean times from the container's JSON responses, caching their curves."""
+        """Mean times from the container's JSON responses, caching their curves.
+
+        A response carries a `LocalAnalysis` only for a model that has one. The
+        same call that predicted explains, so reading it costs no second job.
+        """
+        from lifespan_predictor_sdk.training_log import LocalAnalysis
+
+        local_parts = [r["local_analysis"] for r in responses if "local_analysis" in r]
+        model._local_analysis = (
+            LocalAnalysis.from_dicts(local_parts) if local_parts else None
+        )
+
         all_predictions = []
         all_survival_curves = []
         time_grid = None
@@ -684,7 +746,7 @@ class SageMakerBackend:
         """
         if model_type == "wtte_rnn" or curves is None or time_grid is None:
             return container_means
-        from lifespan_predictor_sdk.calibration import mean_survival_times
+        from lifespan_predictor_sdk.metrics import mean_survival_times
 
         return mean_survival_times(
             pd.DataFrame(np.asarray(curves).T, index=np.asarray(time_grid))
@@ -758,7 +820,7 @@ class SageMakerBackend:
 
         return surv_df
 
-    def get_competing_risk_metrics(self, model, X, durations, events, mask_cindex=None):
+    def get_competing_risk_metrics(self, model, X, durations, events):
         """Not available server-side.
 
         Returns:
@@ -820,7 +882,8 @@ class SageMakerBackend:
 
         Args:
             model: The SurvivalModel instance.
-            model_name: Optional name for the model (auto-generated if None)
+            model_name: Optional name for the model. If None, the model type
+                and a timestamp, e.g. ``deepsurv-2026-10-26-15-49-58-123``.
             endpoint_instance_type: Optional instance type for a real-time
                 endpoint, e.g. ``"ml.m5.large"``.
 
@@ -848,13 +911,8 @@ class SageMakerBackend:
 
         algorithm_arn = self._estimator.algorithm_arn
 
-        # Auto-generate model name from the algorithm name embedded in the
-        # ARN (last segment, e.g. "lifespan-predictor-1-0-4"). That value is
-        # already the sanitized version string, so it satisfies SageMaker's
-        # naming rules and stays in lockstep with the algorithm being deployed.
-        # Fine as a *name*; never as an algorithm identifier — see below.
         if model_name is None:
-            model_name = algorithm_arn.split("/")[-1]
+            model_name = _default_model_name(model.config["model_type"])
 
         # Identify the algorithm by its full ARN, never by the name split out of
         # it. A bare name resolves only inside the caller's account, so it works

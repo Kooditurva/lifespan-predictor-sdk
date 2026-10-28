@@ -3,7 +3,7 @@
 
     python scripts/run_cloud_tests.py                 # build, local tests, cloud tests
     python scripts/run_cloud_tests.py -- -k inference # pass arguments to pytest
-    python scripts/run_cloud_tests.py --notebook      # then run the sample notebook too
+    python scripts/run_cloud_tests.py --notebook      # then run the example notebooks too
     python scripts/run_cloud_tests.py resolve         # print the ARN and its region
 
 It builds the wheel into dist/, installs it in a fresh virtual environment, runs
@@ -37,7 +37,7 @@ import tempfile
 from pathlib import Path
 
 # The free tier's public ARN, written in when the SDK is published.
-DEFAULT_ARN = "arn:aws:sagemaker:eu-west-1:985815980388:algorithm/free-tier-lifespan-predictor-m-a4152a6179703e9aadf7785d54319a8b"
+DEFAULT_ARN = "arn:aws:sagemaker:eu-west-1:985815980388:algorithm/free-tier-lifespan-predictor-m-25f11987ba043299a755d4e16601168e"
 ARN = re.compile(
     r"^arn:aws:sagemaker:([a-z0-9-]+):[0-9]{12}:algorithm/[A-Za-z0-9._-]+$"
 )
@@ -67,14 +67,19 @@ def _bin(venv, name):
     return venv / "bin" / name
 
 
-NOTEBOOK = Path("examples") / "sagemaker_training_demo.ipynb"
+# Every example, recorded in this order. A failure stops the rest.
+NOTEBOOKS = [
+    Path("examples") / "sagemaker_training_demo.ipynb",
+    Path("examples") / "sagemaker_coxph_demo.ipynb",
+    Path("examples") / "sagemaker_coxph_fd003_demo.ipynb",
+]
 
 
 def run(
     arn, region, pytest_args, env, root=ROOT, workdir=None, runner=None, notebook=False
 ):
-    """Build, install and test, then optionally record the notebook. Returns the
-    exit code of the last step."""
+    """Build, install and test, then optionally record the example notebooks.
+    Returns the exit code of the last step."""
     runner = runner or (
         lambda command, env=None, cwd=None: subprocess.run(command, env=env, cwd=cwd)
     )
@@ -126,14 +131,18 @@ def run(
         return code
 
     check([_bin(venv, "pip"), "install", "nbclient", "ipykernel"])
-    return step(
-        [
-            _bin(venv, "python"),
-            root / "scripts" / "record_notebook.py",
-            root / NOTEBOOK,
-        ],
-        cloud_env,
-    )
+    for notebook in NOTEBOOKS:
+        code = step(
+            [
+                _bin(venv, "python"),
+                root / "scripts" / "record_notebook.py",
+                root / notebook,
+            ],
+            cloud_env,
+        )
+        if code:
+            return code
+    return 0
 
 
 def main(argv=None):
@@ -146,7 +155,7 @@ def main(argv=None):
     parser.add_argument(
         "--notebook",
         action="store_true",
-        help="after the tests pass, run the sample notebook and keep its outputs",
+        help="after the tests pass, run the example notebooks and keep their outputs",
     )
     argv = sys.argv[1:] if argv is None else argv
     pytest_args = []

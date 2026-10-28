@@ -1,17 +1,410 @@
 """
-Model calibration utilities for survival analysis.
+Every metric a survival model is scored by, in one module.
 
-This module provides comprehensive tools for assessing survival model calibration quality,
-including calibration curve generation, bias detection, and Integrated Brier Score computation.
+Concordance (Harrell, IPCW, competing risks, Antolini), RMSE, calibration curves
+and bias, and the Integrated Brier Score, with `score()`, which applies all of
+them to one set of labels and predictions on one basis. It needs only NumPy and
+pandas, and matplotlib for the plots.
 """
 
 import warnings
 from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
+import pandas as pd
 
 # Type aliases
 ArrayLike = Union[np.ndarray, list, tuple]
+
+# ---------------------------------------------------------------------------
+# Concordance and error: NumPy only, no external dependencies
+# ---------------------------------------------------------------------------
+
+
+def rmse_score(durations, predictions):
+    """Calculate RMSE between true and predicted values."""
+    return np.sqrt(np.mean((durations - predictions) ** 2))
+
+
+def c_index_score(durations, events, predictions):
+    """
+    Calculate the concordance index (C-index) for survival analysis.
+
+    NumPy-only implementation - no external dependencies required.
+
+    Args:
+        durations: Time to event or censoring (1D array)
+        events: Event indicators (1=event, 0=censored) (1D array)
+        predictions: Predicted scores (1D array, higher = longer survival)
+
+    Returns:
+        C-index score (float between 0 and 1)
+    """
+    durations = np.asarray(durations, dtype=float)
+    events = np.asarray(events)
+    predictions = np.asarray(predictions, dtype=float)
+    n = len(durations)
+
+    # A pair is comparable when the shorter-lived of the two had an event; it is
+    # concordant when that one also has the smaller predicted time. Counted without
+    # visiting pairs: units are taken longest-lived first, so when a unit is reached,
+    # everything already counted outlived it. A Fenwick tree over prediction ranks
+    # then says how many of those predicted longer, shorter, or the same. Units of
+    # equal duration go in together, after all of them are queried, because a pair
+    # of equal durations is never ordered. O(n log n) where visiting pairs was O(n²),
+    # which made tuning, scoring thousands of rows per fold, take minutes per fold.
+    #
+    # A NaN prediction compares as neither smaller nor larger, so a pair with one is a
+    # tie. NaNs are kept out of the tree and counted on their own.
+    is_nan = np.isnan(predictions)
+    ranks = np.zeros(n, dtype=np.int64)
+    ranks[~is_nan] = np.unique(predictions[~is_nan], return_inverse=True)[1] + 1
+    tree = [0] * (int(ranks.max(initial=0)) + 1)
+
+    def counted_up_to(rank):
+        total = 0
+        while rank > 0:
+            total += tree[rank]
+            rank -= rank & -rank
+        return total
+
+    concordant = discordant = tied_risk = 0
+    inserted = inserted_nan = 0
+    order = np.argsort(-durations, kind="stable")
+    sorted_durations = durations[order]
+    start = 0
+    while start < n:
+        stop = start
+        while stop < n and sorted_durations[stop] == sorted_durations[start]:
+            stop += 1
+        group = order[start:stop]
+        for k in group:
+            if events[k] == 0:
+                continue
+            if is_nan[k]:
+                tied_risk += inserted + inserted_nan
+                continue
+            below = counted_up_to(ranks[k] - 1)
+            at_or_below = counted_up_to(ranks[k])
+            concordant += inserted - at_or_below
+            discordant += below
+            tied_risk += at_or_below - below + inserted_nan
+        for k in group:
+            if is_nan[k]:
+                inserted_nan += 1
+                continue
+            rank = ranks[k]
+            while rank < len(tree):
+                tree[rank] += 1
+                rank += rank & -rank
+            inserted += 1
+        start = stop
+
+    # The one case the walk skips: two units with the same duration, both with an event
+    # of cause 1 and the same prediction, count as a tie.
+    both = (events == 1) & ~is_nan
+    same = pd.DataFrame({"d": durations[both], "p": predictions[both]}).value_counts()
+    tied_risk += int((same * (same - 1) // 2).sum())
+
+    total = concordant + discordant + tied_risk
+    if total == 0:
+        return 0.5
+    return (concordant + 0.5 * tied_risk) / total
+
+
+def _censoring_survival(durations, events):
+    """Kaplan-Meier estimate of the censoring distribution, ``G(t) = P(C > t)``.
+
+    The reverse Kaplan-Meier: the "events" are the *censored* observations, so this
+    estimates how long subjects remain under observation rather than how long they
+    survive. Marginal, i.e. assuming censoring is independent of the covariates —
+    the simpler of the two options Wolbers et al. allow, the other being a Cox model
+    for ``G`` conditional on ``X``.
+
+    Returns:
+        ``(times, at, before)`` — the sorted distinct observed times, ``G(t)`` at
+        each, and ``G(t⁻)`` just before each. Two arrays because the estimator needs
+        both: ``G(t⁻) = P(C ≥ t)`` for a subject whose own event is at ``t``, and
+        ``G(t) = P(C > t)`` for one who must still be under observation after ``t``.
+    """
+    durations = np.asarray(durations, dtype=float)
+    events = np.asarray(events).astype(int)
+
+    times = np.unique(durations)
+    at_risk = (durations[:, None] >= times[None, :]).sum(axis=0)
+    censored_here = (
+        (durations[:, None] == times[None, :]) & (events == 0)[:, None]
+    ).sum(axis=0)
+
+    factors = 1.0 - np.divide(
+        censored_here,
+        np.maximum(at_risk, 1),
+        out=np.zeros(times.shape, dtype=float),
+        where=at_risk > 0,
+    )
+    at = np.cumprod(factors)
+    before = np.concatenate(([1.0], at[:-1]))
+    return times, at, before
+
+
+def default_truncation_time(durations, events, min_censoring_survival=0.10):
+    """Largest observed time at which the censoring estimate is still trustworthy.
+
+    An IPCW weight goes as ``1/G²``, and ``G`` decays towards zero in the tail, so
+    late cases can dominate the estimate. Measured on 400 subjects: at 25% censoring
+    the largest pair weight is 8x and the top 1% of pairs carry 3% of the total
+    weight; at 90% censoring those become 639x and **29%**. One percent of the
+    comparisons deciding a third of the answer is not a stable estimate.
+
+    Truncating where ``Ĝ`` is still appreciable bounds that. The default floor of
+    0.10 caps a pair weight near 100x, which is a chosen constant — stated here
+    rather than buried, and overridable by passing ``tau`` explicitly. It is a
+    numerical-stability choice; the *domain* choice, "what follow-up horizon do I
+    care about", is what an explicit ``tau`` expresses.
+
+    Returns ``None`` when censoring is so heavy that ``Ĝ`` is already below the floor
+    at the first observed time — truncating to nothing would be worse than not
+    truncating, and the caller should distrust the result either way.
+    """
+    times, g_at, _ = _censoring_survival(durations, events)
+    usable = g_at >= min_censoring_survival
+    if not usable.any():
+        return None
+    return float(times[usable][-1])
+
+
+def ipcw_c_index(durations, events, risk_scores, tau=None):
+    """IPCW-corrected concordance for ordinary (single-risk) survival data.
+
+    Harrell's C depends on the study's censoring distribution: run the same model
+    against the same population with heavier drop-out and the number moves, though
+    the model has not changed. Weighting each comparable pair by the inverse
+    probability of being uncensored removes that dependence. Uno and others (2011)
+    introduced this correction; Wolbers and others (2014) carry the same machinery
+    into competing risks.
+
+    This is that estimator's ordinary-survival case: with no competing events the
+    competing-risks form has no ``B̃`` pairs, every comparable pair is
+    ``I{T̃ᵢ < T̃ⱼ}``, and each carries weight ``1/(Ĝ(T̃ᵢ⁻)·Ĝ(T̃ᵢ))``. Implemented by
+    delegation rather than as a second estimator, so there is one weighting code path
+    to be right about.
+
+    Args:
+        durations: Observed time to event or censoring.
+        events: ``1`` failed, ``0`` censored.
+        risk_scores: Predicted risk — **higher means more likely to fail**, the
+            opposite of :func:`c_index_score`'s survival-time convention.
+        tau: Truncation time; ``None`` selects one via
+            :func:`default_truncation_time`. See there for why truncation matters.
+
+    Returns:
+        Concordance in ``[0, 1]``, or ``nan`` when no pair is comparable.
+
+    Note:
+        Named for what it is rather than for a paper. The comparable-pair rules and
+        the weighting were verified against Wolbers and others (2014), which is
+        available; Uno's 2011 paper is not open-access and could not be checked, so
+        this does not claim to reproduce that paper's exact published constant. The
+        correction it applies is the same one.
+    """
+    events = np.asarray(events).astype(int)
+    if tau is None:
+        tau = default_truncation_time(durations, events)
+    # Cause 1 with no other causes present: the competing-risks estimator's
+    # degenerate case is exactly the single-risk IPCW concordance.
+    return competing_risk_c_index(
+        durations, np.where(events != 0, 1, 0), risk_scores, cause=1, ipcw=True, tau=tau
+    )
+
+
+def competing_risk_c_index(
+    durations, events, risk_scores, cause=1, ipcw=True, tau=None
+):
+    """Competing-risks-aware concordance for one cause.
+
+    Implements the non-truncated concordance of Wolbers, Blanche, Koller, Witteman &
+    Gerds, "Concordance for prognostic models with competing risks", Biostatistics
+    (2014), equation 2.1::
+
+        C = P(M(Xi) > M(Xj) | Di = 1 and (Ti < Tj or Dj = 2))
+
+    Answers the *predictive* question — does the model rank the units that actually
+    experience cause ``cause``? — rather than the etiologic one that
+    :func:`c_index_score` answers when competing events are relabelled as censored.
+
+    A pair ``(i, j)`` is comparable when ``i`` has an observed ``cause`` event at
+    ``T_i`` and either:
+
+    1. ``T_j > T_i`` — ``j`` was still event-free, so it was genuinely at risk; or
+    2. ``j`` suffered a **competing** event at **any** time, ``T_j < T_i`` included.
+
+    Clause 2 is the whole difference. Censoring ``j`` at its competing event, as the
+    etiologic treatment does, discards that pair whenever the competing event came
+    first — yet ``j`` is exactly the unit we know will never fail from ``cause``, so
+    ranking ``i`` above it is a real success. A *censored* ``j`` before ``T_i`` stays
+    non-comparable: its fate is unknown, which is absence of information rather than
+    information.
+
+    Ordinary right-censoring is handled by inverse probability of censoring weights,
+    the paper's equation 3.4. Without them the estimate inherits Harrell's C's
+    dependence on the study's censoring distribution — *"a major problem of this
+    estimator is that by ignoring non-evaluable pairs without any correction, bias is
+    introduced"* — which is why the paper builds the weighted form and why it is the
+    default here. The two pair types carry different weights::
+
+        Ŵ_ij,1 = G(T̃_i⁻)·G(T̃_i)     j observed later: i's event seen, j still watched
+        Ŵ_ij,2 = G(T̃_i⁻)·G(T̃_j⁻)    j's competing event: *both* events must be seen
+
+    ``G`` is the Kaplan-Meier estimate of the censoring distribution, marginal — the
+    simpler of the two the paper allows, the other being a Cox model conditional on
+    covariates.
+
+    So the metric divides the labour the way the literature does: Wolbers' rules say
+    which pairs count when a competing event removes a unit from risk, and Uno's IPCW
+    machinery keeps ordinary drop-out from biasing the result.
+
+    Args:
+        durations: Observed time to event or censoring.
+        events: ``0`` censored, ``k >= 1`` failed from cause ``k``.
+        risk_scores: Predicted risk of ``cause`` — **higher means more likely to
+            fail**, the opposite of :func:`c_index_score`'s survival-time convention.
+        cause: Which cause to score.
+        ipcw: Weight pairs by inverse censoring probability. ``False`` gives the
+            naive estimator, which is biased under censoring and is retained because
+            it is what degenerates exactly to Harrell's C when no competing event
+            occurs — a property worth testing, not a mode worth reporting.
+        tau: Truncation time. Only cases with ``T̃ᵢ <= tau`` contribute, the paper's
+            ``Ñ¹ᵢ(t)`` restriction (its equation 2.3). ``None`` uses every case.
+
+            Not cosmetic under heavy censoring. Weights go as ``1/G²`` and ``G``
+            falls towards zero in the tail, so late cases can dominate. Measured on
+            400 subjects: at 25% censoring the largest pair weight is 8x and the top
+            1% of pairs carry 3% of the total; at 90% censoring those become 639x and
+            **29%**. Truncating where ``G`` is still appreciable is what keeps the
+            estimate from being decided by a handful of late comparisons.
+
+    Returns:
+        Concordance in ``[0, 1]``, or ``nan`` when no pair is comparable.
+
+    Note:
+        ``nan`` rather than :func:`c_index_score`'s ``0.5``. A missing comparison is
+        unknown, not average, and the per-risk reporting path already treats ``nan``
+        as "undefined for this cause". Pairs with identical durations are skipped, as
+        they are there: with no ordering between them there is nothing to be right or
+        wrong about. Ties in the score count ½, the weighting the paper offers
+        alongside its strict-inequality base definition.
+
+        ``G`` is floored at 1e-8. Past the last observed censoring time it is not
+        identified, and an unfloored zero would turn one pair into an infinite
+        weight rather than an uncertain one.
+    """
+    durations = np.asarray(durations, dtype=float)
+    events = np.asarray(events).astype(int)
+    risk = np.asarray(risk_scores, dtype=float)
+
+    # A unit that failed from any other cause can never fail from `cause`, so it
+    # stays comparable no matter when that happened. Splitting the comparable set
+    # this way reproduces the paper's disjoint Ã (later time) and B̃ (earlier or
+    # equal time, competing event), which need different censoring weights.
+    competing = (events != cause) & (events != 0)
+
+    if ipcw:
+        times, g_at, g_before = _censoring_survival(durations, events)
+        index = np.searchsorted(times, durations)
+        # A weight is 1/G·G; a zero would divide by zero. Beyond the last
+        # observed censoring time G is not identified, so floor rather than blow up.
+        floor = 1e-8
+        own = np.maximum(g_before[index], floor)  # G(T̃⁻) for each subject
+        after = np.maximum(g_at[index], floor)  # G(T̃)  for each subject
+
+    cases = np.flatnonzero(events == cause)
+    if tau is not None:
+        cases = cases[durations[cases] <= tau]
+
+    numerator = 0.0
+    denominator = 0.0
+    for i in cases:
+        later = durations > durations[i]
+        later[i] = False
+        earlier_competing = (durations <= durations[i]) & competing
+        earlier_competing[i] = False
+        if not (later.any() or earlier_competing.any()):
+            continue
+
+        # I{M(X_i) > M(X_j)}, with ties at ½ — the weighting the paper offers
+        # beside its strict-inequality definition.
+        def _q(mask):
+            others = risk[mask]
+            return np.where(
+                risk[i] > others, 1.0, np.where(risk[i] == others, 0.5, 0.0)
+            )
+
+        if ipcw:
+            # Ŵ_ij,1 = G(T̃_i⁻)·G(T̃_i): i's event observed, and j still under
+            # observation at that moment.
+            w_later = np.full(int(later.sum()), 1.0 / (own[i] * after[i]))
+            # Ŵ_ij,2 = G(T̃_i⁻)·G(T̃_j⁻): both events observed, since j's competing
+            # event must itself have been seen for the pair to be usable.
+            w_competing = 1.0 / (own[i] * own[earlier_competing])
+        else:
+            w_later = np.ones(int(later.sum()))
+            w_competing = np.ones(int(earlier_competing.sum()))
+
+        numerator += float(np.sum(w_later * _q(later)))
+        numerator += float(np.sum(w_competing * _q(earlier_competing)))
+        denominator += float(np.sum(w_later)) + float(np.sum(w_competing))
+
+    if denominator == 0:
+        return float("nan")
+    return numerator / denominator
+
+
+def antolini_c_index(durations, events, survival_curves):
+    """Antolini's time-dependent concordance of whole survival curves.
+
+    Where Harrell's C ranks one number per unit, this ranks the curves themselves:
+    a pair is concordant when the unit that failed first had the lower predicted
+    survival at its own failure time. It therefore also scores models whose curves
+    cross, which a single summary number cannot rank.
+
+    Args:
+        durations: Observed time to event or censoring, one per unit.
+        events: ``1`` failed, ``0`` censored, one per unit.
+        survival_curves: Predicted survival probabilities as a DataFrame indexed by
+            time with one column per unit, in the order of ``durations``: the shape
+            ``SurvivalModel.predict()`` returns.
+
+    Returns:
+        Concordance in ``[0, 1]``, or ``nan`` when no pair is comparable.
+    """
+    # NumPy only, like c_index_score, so the SDK computes it without pycox, and
+    # every caller gets the same number. It is pycox's
+    # concordance_td("antolini"): survival is read off the curve's grid at the
+    # last time at or before each duration, a pair (i, j) is comparable when i
+    # failed and j outlived it (or was censored at the same time), and it is
+    # concordant only when i's survival is strictly lower.
+    t = np.asarray(durations, dtype=float)
+    failed = np.asarray(events) != 0
+    grid = np.asarray(survival_curves.index, dtype=float)
+    surv = np.asarray(survival_curves, dtype=float)  # (n_times, n_units)
+    rows = np.clip(np.searchsorted(grid, t, side="right") - 1, 0, len(grid) - 1)
+
+    concordant = 0
+    comparable = 0
+    for i in np.flatnonzero(failed):
+        others = (t > t[i]) | ((t == t[i]) & ~failed)
+        others[i] = False
+        at_ti = surv[rows[i]]
+        comparable += int(np.sum(others))
+        concordant += int(np.sum(at_ti[i] < at_ti[others]))
+    if comparable == 0:
+        return float("nan")
+    return concordant / comparable
+
+
+# ---------------------------------------------------------------------------
+# Calibration and the Integrated Brier Score
+# ---------------------------------------------------------------------------
 
 
 def kaplan_meier(durations: ArrayLike, observed: ArrayLike):
@@ -1048,3 +1441,192 @@ def plot_calibration(
 
     plt.tight_layout()
     return fig, axes
+
+
+# ---------------------------------------------------------------------------
+# Every metric on one basis
+# ---------------------------------------------------------------------------
+
+
+def capped_labels(durations, events, max_rul=None):
+    """The labels every metric is scored on.
+
+    A model predicts no further than `max_rul`, so a unit whose true remaining
+    life is beyond it counts as censored at `max_rul`: it is known to have lasted
+    that long, not when it failed.
+
+    Args:
+        durations: For each unit, the time to failure or censoring.
+        events: For each unit, nonzero if it failed and 0 if it was censored.
+        max_rul: The model's prediction horizon, or None for no cap.
+
+    Returns:
+        A tuple `(durations, events, capped)`: the durations capped at `max_rul`,
+        the events with the capped units censored, and a boolean mask of the
+        units that were capped.
+    """
+    durations = np.asarray(durations, dtype=float)
+    events = np.asarray(events).astype(int)
+    if max_rul is None:
+        return durations, events, np.zeros(len(durations), dtype=bool)
+    capped = durations > max_rul
+    return np.minimum(durations, max_rul), np.where(capped, 0, events), capped
+
+
+def score(
+    durations,
+    events,
+    predictions,
+    survival_curves=None,
+    time_grid=None,
+    max_rul=None,
+):
+    """Score predictions against labels, every metric on one basis.
+
+    Every metric scores every unit. With `max_rul` set, a unit whose duration is
+    beyond it counts as censored at `max_rul` for the C-indices and the IBS, and
+    RMSE compares its prediction with `max_rul`, the truth capped at the horizon.
+    RMSE is over the units that failed. Calibration is over the units that failed
+    within `max_rul`, since it compares each unit's predicted CDF at its true
+    time against a uniform spread, which holds only where the failure was
+    observed.
+
+    Args:
+        durations: For each unit, the time to failure or censoring.
+        events: For each unit, nonzero if it failed and 0 if it was censored.
+        predictions: For each unit, its predicted mean time to failure.
+        survival_curves: Predicted survival probabilities, one row per unit and
+            one column per time in `time_grid`. Without them, the calibration
+            metrics, the IBS and Antolini's C-index are None.
+        time_grid: The times the columns of `survival_curves` are at.
+        max_rul: The model's prediction horizon, or None for no cap.
+
+    Returns:
+        A dict of the keyword arguments of `EvaluationResult` apart from the
+        competing-risks figures: `c_index`, `ipcw_c_index`, `rmse`,
+        `antolini_c_index`, `ibs` and `ibs_classification`, the `calibration_*`
+        values and curves, the `predictions`, the scored durations as `y_test`,
+        the observed `events`, the `capped` and `mask_rmse` masks,
+        `n_calibration` and `max_rul`. A metric that could not be computed is
+        None.
+    """
+    predictions = np.asarray(predictions)
+    events = np.asarray(events).astype(int)
+    durations_scored, events_scored, capped = capped_labels(durations, events, max_rul)
+    # RMSE over every unit that failed, against the capped truth.
+    mask_rmse = events > 0
+    mask_calibration = events_scored > 0
+
+    result = {
+        "c_index": c_index_score(durations_scored, events_scored, predictions),
+        # `predictions` are survival times, so they are negated into a risk for
+        # the IPCW estimator's higher-means-worse convention.
+        "ipcw_c_index": ipcw_c_index(durations_scored, events_scored, -predictions),
+        "rmse": rmse_score(durations_scored[mask_rmse], predictions[mask_rmse]),
+        "predictions": predictions,
+        "mask_rmse": mask_rmse,
+        "y_test": durations_scored,
+        "events": events,
+        "capped": capped,
+        "max_rul": max_rul,
+        "n_calibration": int(np.sum(mask_calibration)),
+        "calibration_bias": None,
+        "calibration_mean_cdf": None,
+        "calibration_classification": None,
+        "calibration_sorted_cdf": None,
+        "calibration_empirical_cdf": None,
+        "calibration_sorted_cdf_events": None,
+        "calibration_empirical_cdf_events": None,
+        "ibs": None,
+        "ibs_classification": None,
+        "antolini_c_index": None,
+    }
+    if survival_curves is None:
+        return result
+
+    survival_curves = np.asarray(survival_curves)
+    time_grid = np.asarray(time_grid, dtype=float)
+
+    try:
+        result.update(
+            _scored_calibration(
+                durations_scored, mask_calibration, survival_curves, time_grid
+            )
+        )
+    except Exception as e:
+        print(f"  ⚠️  Could not compute calibration metrics: {e}")
+
+    try:
+        result.update(
+            _scored_ibs(durations_scored, events_scored, survival_curves, time_grid)
+        )
+    except Exception as e:
+        print(f"  ⚠️  Could not compute IBS: {e}")
+
+    try:
+        surv_df = pd.DataFrame(survival_curves.T, index=time_grid)
+        antolini = antolini_c_index(durations_scored, events_scored, surv_df)
+        if not np.isnan(antolini):
+            result["antolini_c_index"] = float(antolini)
+    except Exception as e:
+        print(f"  ⚠️  Could not compute Antolini C-index: {e}")
+
+    return result
+
+
+def _scored_calibration(durations, mask_calibration, survival_curves, time_grid):
+    """The calibration curve over every unit, and the bias over the units in
+    `mask_calibration`. Calibration compares F(T) with a uniform spread, which
+    holds only where the failure was observed, so the bias needs at least two."""
+    sorted_cdf, empirical_cdf = calibration_curve_data_from_survival(
+        durations, survival_curves, time_grid
+    )
+    scored = {
+        "calibration_sorted_cdf": sorted_cdf.tolist(),
+        "calibration_empirical_cdf": empirical_cdf.tolist(),
+    }
+    if np.sum(mask_calibration) < 2:
+        return scored
+    sorted_cdf, empirical_cdf = calibration_curve_data_from_survival(
+        durations[mask_calibration], survival_curves[mask_calibration], time_grid
+    )
+    mean_cdf = float(np.mean(sorted_cdf))
+    scored.update(
+        calibration_bias=float(calibration_bias(sorted_cdf, empirical_cdf)),
+        calibration_mean_cdf=mean_cdf,
+        calibration_classification=interpret_calibration_bias(mean_cdf)[
+            "classification"
+        ],
+        calibration_sorted_cdf_events=sorted_cdf.tolist(),
+        calibration_empirical_cdf_events=empirical_cdf.tolist(),
+    )
+    return scored
+
+
+def _scored_ibs(durations, events, survival_curves, time_grid):
+    """The IBS over the units with a positive duration, on the part of the grid
+    their durations span; empty when there is too little to integrate."""
+    positive = durations > 0
+    if not np.any(positive) or np.sum(events[positive]) == 0:
+        return {}
+    durations, events = durations[positive], events[positive]
+    in_range = (time_grid >= np.min(durations)) & (time_grid <= np.max(durations))
+    if np.sum(in_range) < 2:
+        return {}
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ibs = integrated_brier_score(
+            durations,
+            events,
+            survival_curves[positive][:, in_range],
+            time_grid[in_range],
+        )
+    for w in caught:
+        print(f"  ⚠️  {w.message}")
+    if np.isnan(ibs):
+        return {}
+    ibs = float(ibs)
+    return {
+        "ibs": ibs,
+        "ibs_classification": interpret_integrated_brier_score(ibs)["classification"],
+    }
