@@ -58,6 +58,36 @@ class CategoricalRange:
     choices: list
 
 
+def _check_cap_sweep_keys(config: dict):
+    """Reject a `decision_horizon` or `cap_metric` that would have no effect or no meaning.
+
+    Both act only through the choice among candidate caps, so they need a
+    `CategoricalRange` on `max_rul`. Checked in `fit()` before any training, so a
+    SageMaker job is never started for a config it would reject.
+    """
+    horizon = config.get("decision_horizon")
+    metric = config.get("cap_metric")
+    if horizon is None and metric is None:
+        return
+    if not isinstance(config.get("max_rul"), CategoricalRange):
+        raise ValueError(
+            "decision_horizon and cap_metric choose max_rul among candidate caps, so "
+            "max_rul must be a CategoricalRange of them, e.g. "
+            "CategoricalRange([100, 125, 150, None])."
+        )
+    if horizon is not None:
+        is_number = isinstance(horizon, (int, float, np.integer, np.floating))
+        if isinstance(horizon, bool) or not is_number or not 0 < horizon < np.inf:
+            raise ValueError(
+                "decision_horizon must be a positive number, in the same unit as "
+                f"duration; got {horizon!r}."
+            )
+    if metric is not None and metric != "rmse":
+        raise ValueError(
+            f"cap_metric={metric!r} is not supported in this version. Use 'rmse'."
+        )
+
+
 # ---------------------------------------------------------------------------
 # SurvivalModel facade
 # ---------------------------------------------------------------------------
@@ -101,13 +131,15 @@ class SurvivalModel:
     | `dropout` | float | `0.1` | yes | Dropout rate after each hidden layer. |
     | `learning_rate` | float | `0.01` | yes | Initial learning rate. It is reduced when the validation loss plateaus. |
     | `batch_size` | int | `256` | yes | Rows per training batch. |
-    | `max_rul` | float or None | `None` | yes | Caps the training durations at this value, and limits the C-index to units whose duration is at most this. Common for turbofan data, where early life carries no wear signal. |
+    | `max_rul` | float or None | `None` | `CategoricalRange` only | Caps the training durations at this value, so the model never predicts beyond it; in evaluation, a unit whose duration is beyond it counts as censored at it. Common for turbofan data, where early life carries no wear signal. A `CategoricalRange` of candidate caps is not tuned like other settings: see **Choosing `max_rul`** under `fit()`. |
     | `use_delta` | bool | `False` | yes | Adds, for each feature, its change from the unit's previous row. |
     | `use_per_unit_normalisation` | bool | `False` | yes | Adds, for each feature, its offset from the unit's first row. |
     | `rolling_means` | list of int or None | `None` | yes | Window sizes; adds, for each feature and window, the unit's rolling mean. |
     | `calibration` | str or None | `None` | yes | `"isotonic"` calibrates the predicted survival curves on the validation data, so `fit()` then needs `val_df` or `val_split`. |
     | `n_trials` | int | `2` | no | Tuning only: how many configurations to try. |
     | `hpo_metric` | str | `"c-index"` | no | Tuning only: the score trials are compared by: `"c-index"`, `"ibs"` (integrated Brier score) or `"antolini"` (time-dependent C-index). |
+    | `decision_horizon` | float or None | `None` | no | Choosing `max_rul` only: the remaining life within which you act on a forecast, roughly your lead time plus the interval between inspections, in the same unit as `duration`. The candidate caps are then compared only on forecasts made with at most this much life left. Needs a `CategoricalRange` on `max_rul`. |
+    | `cap_metric` | str | `"rmse"` | no | Choosing `max_rul` only: what the candidate caps are compared by. `"rmse"`, against the true remaining life, is the only value in this version. Needs a `CategoricalRange` on `max_rul`. |
 
     ### SageMaker settings
 
@@ -293,7 +325,14 @@ class SurvivalModel:
         check when no version reaches it, and a parseable stand-in misses that path
         and fails the comparison instead — telling the caller their version does
         not match, on the strength of a number nobody chose.
+
+        Only the installed package has a version. Imported as a top-level module,
+        this code is not that package, and the metadata found would describe some
+        other distribution.
         """
+        if not __package__:
+            return None
+
         import importlib.metadata
 
         try:
@@ -353,6 +392,38 @@ class SurvivalModel:
         against each other; they do not measure the final model, which a test
         set does.
 
+        **Choosing `max_rul`.** A `CategoricalRange` on `max_rul`, such as
+        `CategoricalRange([100, 125, 150, None])`, is a set of candidate caps,
+        not a range to search. The cap changes the labels a model is scored on,
+        so trials at different caps could not be compared. Instead:
+
+        1. Every trial runs at the largest candidate (`None`, no cap, counts as
+           largest), so the trials stay comparable.
+        2. With the best configuration, each candidate cap is trained on the same
+           folds and scored by its RMSE, in cycles, against the true remaining
+           life of the held-out training units. The fold models are discarded.
+        3. The cap with the lowest RMSE joins the best configuration, and the
+           final model is trained on all the training data with it, as in step 3
+           above. It is the model `fit()` returns.
+
+        Every candidate's RMSE is in `get_tuning_trials().cap_sweep`. That RMSE is
+        against the true remaining life, like the evaluation's `rmse_uncapped`;
+        the evaluation's `rmse` compares with remaining life capped at the chosen
+        `max_rul`. If two caps score nearly alike, you can refit with the one you
+        prefer.
+        `max_rul` may be the only range, in which case only the caps are compared.
+        A `ContinuousRange` or `IntegerRange` on `max_rul` raises `ValueError`.
+
+        Forecasts far from failure rarely change what you do today, and there are
+        many of them, so by default they dominate the comparison and favour a
+        high cap. Give `decision_horizon`, the remaining life within which you act
+        on a forecast (roughly your lead time plus the interval between
+        inspections, in the unit of `duration`), and step 2 scores each cap only
+        on held-out forecasts made with at most that much life left. The best cap
+        is then usually near the horizon. `cap_metric` names what step 2 compares
+        by; `"rmse"` is the only value in this version. Both need a
+        `CategoricalRange` on `max_rul` and change nothing but step 2.
+
         ```python
         model = SurvivalModel({
             "model_type": "deepsurv",
@@ -398,6 +469,8 @@ class SurvivalModel:
             ValueError: If both `val_df` and `val_split` are given, or if
                 `calibration` is `"isotonic"` and there is no validation data.
         """
+        _check_cap_sweep_keys(self.config)
+
         if val_df is not None and val_split is not None:
             raise ValueError(
                 "val_df and val_split are mutually exclusive. "
@@ -515,8 +588,9 @@ class SurvivalModel:
         Typically `X` is a test set's last row per unit, and `durations` and
         `events` its labels. Every metric scores every unit. With `max_rul` set,
         a unit whose duration is beyond it counts as censored at `max_rul`, and
-        RMSE compares its prediction with `max_rul`; see `EvaluationResult` for
-        how each metric is scored.
+        RMSE compares its prediction with `max_rul`. `rmse_uncapped` compares
+        it with the true duration instead; see `EvaluationResult` for how each
+        metric is scored.
 
         Args:
             X: Feature rows, as for `predict_mean()`.
@@ -525,8 +599,8 @@ class SurvivalModel:
                 censored.
 
         Returns:
-            An `EvaluationResult` with the C-index, RMSE, calibration and
-            integrated Brier score.
+            An `EvaluationResult` with the C-index, RMSE (capped and uncapped),
+            calibration and integrated Brier score.
 
         Raises:
             ValueError: If the model has not been fitted.

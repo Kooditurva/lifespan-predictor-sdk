@@ -6,9 +6,12 @@ name: SDK Cloud Tests
 # GitHub; publishing is permanent, because releases here are immutable. On any
 # other branch it tests and drafts nothing.
 #
-# Two jobs. cloud-tests keeps the tested wheel and the recorded notebooks as
-# this run's artifact; publish fetches them. If only publish fails, "Re-run
-# failed jobs" reruns it alone, without paying for the tests again.
+# Four jobs. build builds the wheel and runs the local tests against it, and
+# keeps it as this run's artifact; nothing is billed before it passes.
+# cloud-tests and one notebook job per example then run in parallel, each
+# installing that same wheel and signing in for itself; each notebook job keeps
+# its recording. publish fetches the wheel and every recording. "Re-run failed
+# jobs" reruns only what failed: a failed notebook alone, or the publish alone.
 #
 # Runs in any fork, in the fork's own AWS account, with no edit to this file.
 # Everything account-specific comes from the fork's settings:
@@ -17,13 +20,14 @@ name: SDK Cloud Tests
 #       the algorithm ARN of your Marketplace subscription. Defaults to the
 #       free tier's in eu-west-1. The region is read from it.
 #   AWS_ROLE_ARN secret:        a role this repository may assume through
-#                               GitHub OIDC. The run signs in for three
-#                               hours, so the role's MaxSessionDuration
-#                               must be at least 10800 seconds.
+#                               GitHub OIDC. Each job that signs in does so
+#                               for three hours, so the role's
+#                               MaxSessionDuration must be at least 10800
+#                               seconds.
 #   AWS_SESSION_SECONDS variable: optional; the session's length in seconds,
 #                               10800 if unset. Set it lower if your role
-#                               allows less, though the run may then not
-#                               finish its notebooks.
+#                               allows less, though a notebook may then not
+#                               finish inside it.
 #   SAGEMAKER_ROLE_ARN secret:  the SageMaker execution role your jobs run as.
 #   SAGEMAKER_BUCKET variable:  optional; SageMaker's default bucket otherwise.
 
@@ -36,13 +40,14 @@ on:
         default: ''
 
 jobs:
-  cloud-tests:
+  build:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # For OIDC authentication
       contents: read
     outputs:
       algorithm_arn: ${{ steps.resolve_arn.outputs.arn }}
+      region: ${{ steps.resolve_arn.outputs.region }}
+      notebooks: ${{ steps.resolve_arn.outputs.notebooks }}
 
     steps:
       - uses: actions/checkout@v4
@@ -61,46 +66,115 @@ jobs:
         run: python scripts/draft_release.py check
 
       # Resolving needs no credentials, so a malformed ARN stops the run before
-      # it signs in. The dispatch input reaches the script through its
+      # anything signs in. The dispatch input reaches the script through its
       # environment, never interpolated into it, so it cannot inject a command.
+      # It also outputs the example notebooks, which the notebook matrix reads.
       - name: Resolve the algorithm ARN and its region
         id: resolve_arn
         env:
           SAGEMAKER_ALGORITHM_ARN: ${{ inputs.algorithm_arn || vars.SAGEMAKER_ALGORITHM_ARN }}
         run: python scripts/run_cloud_tests.py resolve
 
+      # scripts/run_cloud_tests.py is what anyone with a clone runs: one way to
+      # run these tests, not two. Each job runs its own part of it.
+      - name: Build the wheel and run the local tests against it
+        run: python scripts/run_cloud_tests.py build
+
+      - name: Keep the tested wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: tested-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+
+  cloud-tests:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # For OIDC authentication
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch the tested wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: tested-wheel
+          path: dist
+
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ steps.resolve_arn.outputs.region }}
-          # The tests and three example notebooks outlast the default hour.
+          aws-region: ${{ needs.build.outputs.region }}
           role-duration-seconds: ${{ vars.AWS_SESSION_SECONDS || '10800' }}
 
-      # scripts/run_cloud_tests.py is what anyone with a clone runs: one way to
-      # run these tests, not two. It builds the wheel into dist/, runs the local
-      # tests against it before anything is billed, then the cloud tests, then
-      # the example notebooks, whose cleaned outputs it writes in place.
-      - name: Run the tests and the example notebooks
+      - name: Run the cloud tests against the tested wheel
         env:
-          SAGEMAKER_ALGORITHM_ARN: ${{ steps.resolve_arn.outputs.arn }}
+          SAGEMAKER_ALGORITHM_ARN: ${{ needs.build.outputs.algorithm_arn }}
           SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
           SAGEMAKER_BUCKET: ${{ vars.SAGEMAKER_BUCKET }}
-        run: python scripts/run_cloud_tests.py run --notebook
+        run: python scripts/run_cloud_tests.py cloud
 
-      - name: Keep the tested wheel and the recorded notebooks
+  notebook:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # For OIDC authentication
+      contents: read
+    strategy:
+      # Each notebook is its own record: one failing doesn't cancel the others,
+      # and "Re-run failed jobs" reruns only it.
+      fail-fast: false
+      matrix:
+        notebook: ${{ fromJSON(needs.build.outputs.notebooks) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch the tested wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: tested-wheel
+          path: dist
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ needs.build.outputs.region }}
+          role-duration-seconds: ${{ vars.AWS_SESSION_SECONDS || '10800' }}
+
+      # Runs the notebook with the tested wheel and writes its cleaned outputs
+      # in place.
+      - name: Record the notebook with the tested wheel
+        env:
+          NOTEBOOK: ${{ matrix.notebook }}
+          SAGEMAKER_ALGORITHM_ARN: ${{ needs.build.outputs.algorithm_arn }}
+          SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_ROLE_ARN }}
+          SAGEMAKER_BUCKET: ${{ vars.SAGEMAKER_BUCKET }}
+        run: python scripts/run_cloud_tests.py record "examples/$NOTEBOOK"
+
+      - name: Keep the recorded notebook
         uses: actions/upload-artifact@v4
         with:
-          name: tested-release
-          path: |
-            dist/*.whl
-            examples/sagemaker_training_demo.ipynb
-            examples/sagemaker_coxph_demo.ipynb
-            examples/sagemaker_coxph_fd003_demo.ipynb
+          name: recording-${{ matrix.notebook }}
+          path: examples/${{ matrix.notebook }}
           if-no-files-found: error
 
   publish:
-    needs: cloud-tests
+    needs: [build, cloud-tests, notebook]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -116,16 +190,24 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Into dist/ and examples/, where cloud-tests left them.
-      - name: Fetch the tested wheel and the recorded notebooks
+      - name: Fetch the tested wheel
         uses: actions/download-artifact@v4
         with:
-          name: tested-release
+          name: tested-wheel
+          path: dist
+
+      # Into examples/, over main's unexecuted copies.
+      - name: Fetch the recorded notebooks
+        uses: actions/download-artifact@v4
+        with:
+          pattern: recording-*
+          path: examples
+          merge-multiple: true
 
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ALGORITHM_ARN: ${{ needs.cloud-tests.outputs.algorithm_arn }}
+          ALGORITHM_ARN: ${{ needs.build.outputs.algorithm_arn }}
         run: >-
           python scripts/draft_release.py draft
           --algorithm-arn "$ALGORITHM_ARN" --tested-commit "$GITHUB_SHA"

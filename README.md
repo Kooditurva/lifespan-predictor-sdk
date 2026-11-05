@@ -26,7 +26,7 @@ subscription is what grants access to it.
 
 | Product | Region | Algorithm ARN |
 |---|---|---|
-| Free Tier Lifespan Predictor | `eu-west-1` | `arn:aws:sagemaker:eu-west-1:985815980388:algorithm/free-tier-lifespan-predictor-m-25f11987ba043299a755d4e16601168e` |
+| Free Tier Lifespan Predictor | `eu-west-1` | `arn:aws:sagemaker:eu-west-1:985815980388:algorithm/free-tier-lifespan-predictor-m-61cb7b65231331099f089cbf75f4410e` |
 
 To find the ARN in the AWS console instead: open **AWS Marketplace → Manage
 subscriptions**, choose the product, then **Continue to configuration**, and
@@ -38,10 +38,10 @@ You pay AWS for the SageMaker instances your jobs run on, with either product.
 
 ```bash
 # Install the wheel directly
-pip install "https://github.com/kooditurva/lifespan-predictor-sdk/releases/download/v1.1.0/lifespan_predictor-1.1.0-py3-none-any.whl"
+pip install "https://github.com/kooditurva/lifespan-predictor-sdk/releases/download/v1.2.0/lifespan_predictor-1.2.0-py3-none-any.whl"
 
 # Or add to an existing uv project
-uv add "lifespan-predictor @ git+https://github.com/kooditurva/lifespan-predictor-sdk@v1.1.0"
+uv add "lifespan-predictor @ git+https://github.com/kooditurva/lifespan-predictor-sdk@v1.2.0"
 ```
 
 See the [Releases page](https://github.com/kooditurva/lifespan-predictor-sdk/releases)
@@ -74,7 +74,7 @@ dataset. The ARN below is the free tier's in `eu-west-1`; use the one for your
 product and region.
 
 ```bash
-export SAGEMAKER_ALGORITHM_ARN='arn:aws:sagemaker:eu-west-1:985815980388:algorithm/free-tier-lifespan-predictor-m-25f11987ba043299a755d4e16601168e'
+export SAGEMAKER_ALGORITHM_ARN='arn:aws:sagemaker:eu-west-1:985815980388:algorithm/free-tier-lifespan-predictor-m-61cb7b65231331099f089cbf75f4410e'
 export SAGEMAKER_ROLE_ARN='arn:aws:iam::ACCOUNT:role/service-role/YOUR-SageMaker-ExecutionRole'
 # Optional: the S3 bucket for training data and model artifacts. Without it,
 # SageMaker's default bucket for your account and region is used.
@@ -181,7 +181,7 @@ endpoint, then cleanup. It fits the free tier, needs the environment variables
 from the [Quick Start](#quick-start), and submits billed SageMaker jobs.
 
 [See it with the output of the run that tested
-v1.1.0](https://github.com/Kooditurva/lifespan-predictor-sdk/blob/v1.1.0/examples/sagemaker_training_demo.ipynb)
+v1.2.0](https://github.com/Kooditurva/lifespan-predictor-sdk/blob/v1.2.0/examples/sagemaker_training_demo.ipynb)
 before running it yourself.
 
 [`sagemaker_coxph_demo.ipynb`](examples/sagemaker_coxph_demo.ipynb) does the same
@@ -217,23 +217,27 @@ as a release does. Without `SAGEMAKER_ALGORITHM_ARN` it uses the free tier's ARN
 `eu-west-1`. Arguments after `--` go to pytest, for example
 `python scripts/run_cloud_tests.py -- -k inference`.
 
-The `SDK Cloud Tests` workflow runs the same script. To run it in a fork, set the
-`AWS_ROLE_ARN` secret to a role GitHub may assume through OIDC, the
-`SAGEMAKER_ROLE_ARN` secret, and optionally the `SAGEMAKER_ALGORITHM_ARN` and
-`SAGEMAKER_BUCKET` repository variables.
+The `SDK Cloud Tests` workflow runs the same script, one part per job:
+`build` builds the wheel and runs the local tests, then `cloud` runs the cloud
+tests and `record NOTEBOOK` records one notebook, each with that wheel. To run
+it in a fork, set the `AWS_ROLE_ARN` secret to a role GitHub may assume through
+OIDC, the `SAGEMAKER_ROLE_ARN` secret, and optionally the
+`SAGEMAKER_ALGORITHM_ARN` and `SAGEMAKER_BUCKET` repository variables.
 
 ## Release Process
 
 The `SDK Cloud Tests` workflow, run by hand on `main`, is the only thing that
-tags. It runs the local tests, the cloud tests and the sample notebook against
-the free tier, and when all pass it tags `vX.Y.Z` and creates a draft release
-with the tested wheel. The tag's commit adds the notebook's recorded outputs to
-the tested one. A maintainer then publishes the draft. Releases here are
-immutable, so a published version never moves; until then, a rerun replaces the
-draft and its tag.
+tags. It builds the wheel and runs the local tests, then runs the cloud tests and
+each example notebook against the free tier, in parallel jobs that all use that
+wheel. When all pass it tags `vX.Y.Z` and creates a draft release with the
+tested wheel. The tag's commit adds the notebooks' recorded outputs to the tested
+one. A maintainer then publishes the draft. Releases here are immutable, so a
+published version never moves; until then, a rerun replaces the draft and its
+tag.
 
-If the tests pass but creating the draft fails, use "Re-run failed jobs" on the
-run. It reruns only that job, with the wheel and the notebook the tests produced.
+If a notebook or creating the draft fails, use "Re-run failed jobs" on the run.
+It reruns only the jobs that failed, with the wheel and the recordings the
+others produced.
 
 ## License
 

@@ -158,11 +158,19 @@ class TuningTrials:
         best_config: The config of the best trial, with every range replaced by
             its best value and without `n_trials`. This is the config `fit()`
             retrained with.
+        cap_sweep: When `max_rul` was a `CategoricalRange`, one entry per candidate
+            cap in the order given: `{"max_rul": cap, "rmse": ..., "fold_rmse": [...]}`.
+            Each cap is trained with the best settings and scored by its RMSE, in
+            cycles, against the true remaining life of held-out training units; the
+            lowest wins. This RMSE is not capped, unlike the model's evaluation, which
+            compares with remaining life capped at the chosen `max_rul`. None when
+            `max_rul` was not a range.
     """
 
     def __init__(self, trials: list):
         self._trials = trials
         self.best_config: dict | None = None
+        self.cap_sweep: list | None = None
 
     def __bool__(self):
         return bool(self._trials)
