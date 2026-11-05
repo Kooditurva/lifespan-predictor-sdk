@@ -1486,7 +1486,8 @@ def score(
     Every metric scores every unit. With `max_rul` set, a unit whose duration is
     beyond it counts as censored at `max_rul` for the C-indices and the IBS, and
     RMSE compares its prediction with `max_rul`, the truth capped at the horizon.
-    RMSE is over the units that failed. Calibration is over the units that failed
+    RMSE is over the units that failed, and `rmse_uncapped` is RMSE over the same
+    units against their true durations. Calibration is over the units that failed
     within `max_rul`, since it compares each unit's predicted CDF at its true
     time against a uniform spread, which holds only where the failure was
     observed.
@@ -1504,13 +1505,14 @@ def score(
     Returns:
         A dict of the keyword arguments of `EvaluationResult` apart from the
         competing-risks figures: `c_index`, `ipcw_c_index`, `rmse`,
-        `antolini_c_index`, `ibs` and `ibs_classification`, the `calibration_*`
+        `rmse_uncapped`, `antolini_c_index`, `ibs` and `ibs_classification`, the `calibration_*`
         values and curves, the `predictions`, the scored durations as `y_test`,
         the observed `events`, the `capped` and `mask_rmse` masks,
         `n_calibration` and `max_rul`. A metric that could not be computed is
         None.
     """
     predictions = np.asarray(predictions)
+    durations = np.asarray(durations, dtype=float)
     events = np.asarray(events).astype(int)
     durations_scored, events_scored, capped = capped_labels(durations, events, max_rul)
     # RMSE over every unit that failed, against the capped truth.
@@ -1523,6 +1525,9 @@ def score(
         # the IPCW estimator's higher-means-worse convention.
         "ipcw_c_index": ipcw_c_index(durations_scored, events_scored, -predictions),
         "rmse": rmse_score(durations_scored[mask_rmse], predictions[mask_rmse]),
+        # The same units against their true durations, so models with different
+        # caps can be compared (issue #285).
+        "rmse_uncapped": rmse_score(durations[mask_rmse], predictions[mask_rmse]),
         "predictions": predictions,
         "mask_rmse": mask_rmse,
         "y_test": durations_scored,

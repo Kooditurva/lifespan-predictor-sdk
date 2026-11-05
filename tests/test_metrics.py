@@ -1314,6 +1314,29 @@ def test_rmse_scores_capped_truth_over_every_failed_unit():
 
 
 @pytest.mark.local
+def test_rmse_uncapped_scores_the_true_remaining_life():
+    """Beside the capped RMSE, one against the true remaining life, over the same
+    units; without max_rul the two are the same."""
+    predictions, curves = scored_inputs()
+    events = EVENTS.copy()
+    events[2] = 0  # censored in the data: no true time, so in neither RMSE
+    failed = events > 0
+    result = metrics.score(DURATIONS, events, predictions, curves, GRID, MAX_RUL)
+
+    capped_truth = np.minimum(DURATIONS, MAX_RUL)[failed]
+    assert result["rmse"] == pytest.approx(
+        np.sqrt(np.mean((capped_truth - predictions[failed]) ** 2))
+    )
+    assert result["rmse_uncapped"] == pytest.approx(
+        np.sqrt(np.mean((DURATIONS[failed] - predictions[failed]) ** 2))
+    )
+    assert result["rmse_uncapped"] > result["rmse"]
+
+    uncapped = metrics.score(DURATIONS, events, predictions, curves, GRID)
+    assert uncapped["rmse_uncapped"] == uncapped["rmse"]
+
+
+@pytest.mark.local
 def test_calibration_scores_the_units_that_failed_within_max_rul():
     """Calibration bias uses the units uncensored after capping."""
     predictions, curves = scored_inputs()

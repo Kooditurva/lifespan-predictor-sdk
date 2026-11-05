@@ -48,10 +48,12 @@ def load_tuning_trials(s3, model_data_uri: str, config: dict):
     from lifespan_predictor_sdk.hpo_io import TrialResult, TuningTrials, without_internal_keys
     from lifespan_predictor_sdk.survival_model import CategoricalRange, ContinuousRange, IntegerRange
 
+    # A max_rul range is swept after the trials, not searched by them.
     tuned = [
         key
         for key, value in config.items()
         if isinstance(value, (ContinuousRange, IntegerRange, CategoricalRange))
+        and key != "max_rul"
     ]
 
     bucket = model_data_uri.split("/")[2]
@@ -92,6 +94,10 @@ def load_tuning_trials(s3, model_data_uri: str, config: dict):
         if os.path.exists(best_config_path):
             with open(best_config_path) as f:
                 trials.best_config = without_internal_keys(json.load(f))
+        cap_sweep_path = os.path.join(tmpdir, "cap_sweep.json")
+        if os.path.exists(cap_sweep_path):
+            with open(cap_sweep_path) as f:
+                trials.cap_sweep = json.load(f)
         return trials
 
 
@@ -111,6 +117,7 @@ def _evaluation_result_from_metrics(metrics, calibration_curves=None):
     from lifespan_predictor_sdk.training_log import EvaluationResult
 
     keys = (
+        "rmse_uncapped",
         "ipcw_c_index",
         "antolini_c_index",
         "calibration_bias",
@@ -144,17 +151,25 @@ def _global_analysis_from_metrics(metrics):
     return GlobalAnalysis.from_dict(metrics["global_analysis"])
 
 
+def _name_prefix(model_type):
+    """What a training job's and a model's name start with: the model type.
+
+    SageMaker names allow no underscore, so ``wtte_rnn`` is ``wtte-rnn``.
+
+    """
+    return model_type.replace("_", "-")
+
+
 def _default_model_name(model_type):
     """The name deploy() gives a model when the caller gives none.
 
     The model type and a timestamp, e.g. ``deepsurv-2026-10-26-15-49-58-123``.
     Every deploy gets its own: a name shared by all deploys of one algorithm
-    version let the second delete the first one's model. SageMaker names allow
-    no underscore.
+    version let the second delete the first one's model.
     """
     from sagemaker.utils import name_from_base
 
-    return name_from_base(model_type.replace("_", "-"))
+    return name_from_base(_name_prefix(model_type))
 
 
 def _validate_sagemaker_role():
@@ -385,7 +400,8 @@ class SageMakerBackend:
             instance_count=1,
             instance_type=model.config["instance_type"],
             sagemaker_session=sagemaker_session,
-            base_job_name="survival-model",
+            # SageMaker adds the timestamp.
+            base_job_name=_name_prefix(model.config["model_type"]),
             output_path=output_path,
             hyperparameters={
                 "config": json.dumps(serialized_config),
@@ -525,6 +541,20 @@ class SageMakerBackend:
         )
         if tuning_trials is not None:
             model._tuning_trials = tuning_trials
+            if tuning_trials.best_config is not None:
+                # The config is now what the model was trained with.
+                # The job never sees where it runs, so those settings come from
+                # the config it was given.
+                from lifespan_predictor_sdk.hpo_io import INTERNAL_CONFIG_KEYS
+
+                model.config = {
+                    **{
+                        k: v
+                        for k, v in model.config.items()
+                        if k in INTERNAL_CONFIG_KEYS
+                    },
+                    **tuning_trials.best_config,
+                }
 
         # Store evaluation result if metrics were available
         if test_c_index is not None:

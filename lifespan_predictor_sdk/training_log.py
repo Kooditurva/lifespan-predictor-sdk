@@ -26,7 +26,10 @@ class EvaluationResult:
         antolini_c_index: The time-dependent concordance of the whole survival
             curves.
         rmse: Root mean squared error of the predicted mean times, over the
-            units that failed.
+            units that failed, against their remaining life capped at
+            `max_rul`.
+        rmse_uncapped: The same, against their true remaining life. Without
+            `max_rul` it equals `rmse`.
         ibs: Integrated Brier score of the survival curves; lower is better.
         ibs_classification: A plain-words reading of `ibs`.
         calibration_bias: How far the predicted probabilities are from the
@@ -51,6 +54,11 @@ class EvaluationResult:
     - **RMSE** compares its prediction with `max_rul`, the truth capped at the
       horizon, which is the usual convention on the NASA turbofan data. A unit
       censored in the data has no true time, so RMSE leaves it out.
+    - **`rmse_uncapped`** compares the same units' predictions with their true
+      remaining life. A smaller cap always scores better on `rmse`, so use
+      `rmse` to compare models that share a cap, and `rmse_uncapped` to compare
+      caps or to judge forecasts for units far from failure. No other metric
+      has an uncapped version: the model's curves end at `max_rul`.
     - **The calibration bias** compares each unit's predicted probability of
       having failed by its true time against an even spread, which holds only
       for units whose failure was observed. It therefore uses the units that
@@ -91,11 +99,13 @@ class EvaluationResult:
         n_capped=None,
         n_rmse=None,
         n_calibration=None,
+        rmse_uncapped=None,
     ):
         import numpy as np
 
         self.c_index = c_index
         self.rmse = rmse
+        self.rmse_uncapped = rmse_uncapped
         self.predictions = predictions
         self.mask_rmse = mask_rmse
         self.y_test = y_test
@@ -162,6 +172,8 @@ class EvaluationResult:
             computed, and the counts of units they were scored over.
         """
         metrics = {"c_index": self.c_index, "rmse": self.rmse}
+        if self.rmse_uncapped is not None:
+            metrics["rmse_uncapped"] = self.rmse_uncapped
         if self.ipcw_c_index is not None:
             metrics["ipcw_c_index"] = self.ipcw_c_index
         if self.antolini_c_index is not None:
@@ -213,6 +225,9 @@ class EvaluationResult:
                 f"max_rul={m}, the horizon the model predicts: RMSE counts {them} as "
                 f"{m}, and the C-indices and IBS treat {them} as censored at {m}."
             )
+            if self.rmse_uncapped is not None:
+                their = "its" if capped == 1 else "their"
+                text += f" The uncapped RMSE uses {their} true remaining life."
         if self.n_rmse is not None and self.n_rmse < n:
             text += f" RMSE uses the {self.n_rmse} that failed."
         if (
@@ -227,6 +242,10 @@ class EvaluationResult:
         return textwrap.wrap(
             text, width=76, initial_indent="  ", subsequent_indent="  "
         )
+
+    def _reports_two_rmses(self):
+        """Whether the RMSEs are on two bases: only with `max_rul` set."""
+        return self.max_rul is not None and self.rmse_uncapped is not None
 
     def print_metrics(self):
         """Print evaluation metrics in a formatted table.
@@ -277,7 +296,17 @@ class EvaluationResult:
             print(
                 f"  C-index (Antolini):   {self.antolini_c_index:.4f}  (higher is better, time-dependent)"
             )
-        print(f"  RMSE:                 {self.rmse:.4f}  (lower is better)")
+        if self._reports_two_rmses():
+            print(
+                f"  RMSE (capped):        {self.rmse:.4f}  (lower is better; truth "
+                "capped at max_rul)"
+            )
+            print(
+                f"  RMSE (uncapped):      {self.rmse_uncapped:.4f}  (against the true "
+                "remaining life)"
+            )
+        else:
+            print(f"  RMSE:                 {self.rmse:.4f}  (lower is better)")
         if self.ibs is not None:
             label = f"  ({self.ibs_classification})" if self.ibs_classification else ""
             print(
