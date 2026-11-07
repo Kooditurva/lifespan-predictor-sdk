@@ -6,3 +6,4 @@
 - `decision_horizon` focuses that choice on the remaining life you plan maintenance around.
 - A new score, `rmse_uncapped`: the error against the true remaining life.
 - Fixes: after tuning on SageMaker, `model.config` shows the tuned values; training jobs are named after the model type; the same data trains the same model.
+- A new example, `examples/sagemaker_coxph_horizon_demo.ipynb`: `fit` chooses `max_rul` within a `decision_horizon`, in one training job.

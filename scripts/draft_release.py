@@ -37,6 +37,7 @@ NOTEBOOKS = [
     "examples/sagemaker_training_demo.ipynb",
     "examples/sagemaker_coxph_demo.ipynb",
     "examples/sagemaker_coxph_fd003_demo.ipynb",
+    "examples/sagemaker_coxph_horizon_demo.ipynb",
 ]
 # A runner has no git identity, and the commit and the annotated tag both need one.
 AS_BOT = [

@@ -38,10 +38,10 @@ You pay AWS for the SageMaker instances your jobs run on, with either product.
 
 ```bash
 # Install the wheel directly
-pip install "https://github.com/kooditurva/lifespan-predictor-sdk/releases/download/v1.2.0/lifespan_predictor-1.2.0-py3-none-any.whl"
+pip install "https://github.com/kooditurva/lifespan-predictor-sdk/releases/download/v1.2.0.post1/lifespan_predictor-1.2.0.post1-py3-none-any.whl"
 
 # Or add to an existing uv project
-uv add "lifespan-predictor @ git+https://github.com/kooditurva/lifespan-predictor-sdk@v1.2.0"
+uv add "lifespan-predictor @ git+https://github.com/kooditurva/lifespan-predictor-sdk@v1.2.0.post1"
 ```
 
 See the [Releases page](https://github.com/kooditurva/lifespan-predictor-sdk/releases)
@@ -181,7 +181,7 @@ endpoint, then cleanup. It fits the free tier, needs the environment variables
 from the [Quick Start](#quick-start), and submits billed SageMaker jobs.
 
 [See it with the output of the run that tested
-v1.2.0](https://github.com/Kooditurva/lifespan-predictor-sdk/blob/v1.2.0/examples/sagemaker_training_demo.ipynb)
+v1.2.0.post1](https://github.com/Kooditurva/lifespan-predictor-sdk/blob/v1.2.0.post1/examples/sagemaker_training_demo.ipynb)
 before running it yourself.
 
 [`sagemaker_coxph_demo.ipynb`](examples/sagemaker_coxph_demo.ipynb) does the same
@@ -196,6 +196,12 @@ the two failure modes: it groups the sensors with `feature_groups()`, clusters
 the riskiest engines by their explanations with `cluster_units()`, and checks
 the clusters against the raw sensor drift. One training job and one batch
 transform.
+
+[`sagemaker_coxph_horizon_demo.ipynb`](examples/sagemaker_coxph_horizon_demo.ipynb)
+lets `fit()` choose the RUL cap `max_rul` from a set of candidates, compared only on
+forecasts within a `decision_horizon`: the remaining life you plan maintenance
+around. One training job tunes, chooses the cap, trains and scores; nothing is
+deployed.
 
 ## Running the Tests
 

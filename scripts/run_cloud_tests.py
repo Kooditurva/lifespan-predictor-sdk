@@ -60,6 +60,7 @@ NOTEBOOKS = [
     Path("examples") / "sagemaker_training_demo.ipynb",
     Path("examples") / "sagemaker_coxph_demo.ipynb",
     Path("examples") / "sagemaker_coxph_fd003_demo.ipynb",
+    Path("examples") / "sagemaker_coxph_horizon_demo.ipynb",
 ]
 
 
